@@ -13,8 +13,9 @@ supports safe ejection. It never deletes, renames, reorganizes, or writes metada
 never erases/formats media and never claims that a card is safe to erase.
 
 Photo browsing, culling, ratings, histograms, pixel inspection, comparison, and analytics belong to
-SDelight. SDelight is optional; a verified destination can be revealed in Finder or handed off when
-SDelight is installed.
+SDelight. SDelight is optional; a verified destination can be revealed in Finder, and SDelight can be
+launched when installed. SDelight requires the folder to be selected in its own picker because it does
+not register folders as documents that another macOS app can open.
 
 ## Architecture
 
@@ -24,13 +25,15 @@ SDelight is installed.
 - `TransferCoordinator` reads sources predictably and sequentially, while keeping primary and backup
   outcomes independent. Filesystem operations run behind an actor with deterministic fault injection.
 - `CardVault` is the macOS SwiftUI presentation layer. The navigation split view, Mac toolbar,
-  keyboard commands, folder panels, phased progress, history table, Finder handoff, SDelight handoff,
+  keyboard commands, folder panels, phased progress, history table, Finder reveal, SDelight launch,
   and eject action observe core results without owning durable truth.
 - `.cardvault/transfer-manifest.json` is the authoritative portable record. The local history is only
   an index. See [manifest schema v1](Docs/manifest-schema-v1.md).
 
 Strict concurrency checking is enabled. The app target uses App Sandbox with user-selected read/write
 folders and app-scoped security bookmarks. The core and tests do not require a physical SD card.
+Choosing a detected removable volume opens a macOS permission panel rooted at that volume; access is
+saved for later launches with a security-scoped bookmark.
 
 ## Transfer behavior
 

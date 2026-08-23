@@ -45,11 +45,7 @@ final class AppModel {
 
     func chooseSource() {
         guard let url = chooseFolder(prompt: "Choose Source") else { return }
-        sourceURL = url
-        sourceVolume = Self.volumeIdentity(for: url, defaultName: url.lastPathComponent, removable: true)
-        Task { try? await bookmarkStore.save(url: url, key: "last-source") }
-        transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
-        scan()
+        selectSource(url)
     }
 
     func choosePrimary() {
@@ -67,6 +63,8 @@ final class AppModel {
     func scan() {
         guard let sourceURL else { return }
         isWorking = true
+        scanResult = nil
+        preflight = nil
         message = "Scanning source without modifying it…"
         let selectedMode = mode
         Task {
@@ -126,20 +124,34 @@ final class AppModel {
     }
 
     func selectDetectedVolume(_ volume: MountedVolume) {
-        sourceURL = volume.url
-        sourceVolume = volume.identity
-        transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
-        scan()
+        guard let url = chooseFolder(
+            prompt: "Allow Access to \(volume.identity.displayName)",
+            initialDirectory: volume.url,
+            message: "macOS requires your permission before CardVault can read this volume.",
+            confirmButtonTitle: "Allow Access"
+        ) else { return }
+        let selectedVolume = url.standardizedFileURL == volume.url.standardizedFileURL ? volume.identity : nil
+        selectSource(url, knownVolume: selectedVolume)
     }
 
     func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
 
-    func openInSDelight(_ url: URL) {
-        guard let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.dennisfriedrichsen.SDelight")
+    func launchSDelight(for url: URL) {
+        guard let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.friedrichsenweb.SDelight")
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.dennisfriedrichsen.SDelight")
                 ?? (FileManager.default.fileExists(atPath: "/Applications/SDelight.app") ? URL(filePath: "/Applications/SDelight.app") : nil)
         else { errorMessage = "SDelight is not installed. The verified files remain available in Finder."; return }
-        NSWorkspace.shared.open([url], withApplicationAt: application,
-                                configuration: NSWorkspace.OpenConfiguration())
+        Task {
+            do {
+                _ = try await NSWorkspace.shared.openApplication(
+                    at: application,
+                    configuration: NSWorkspace.OpenConfiguration()
+                )
+                message = "SDelight opened — choose \(url.lastPathComponent) in SDelight's folder picker."
+            } catch {
+                present(error, operation: "Opening SDelight")
+            }
+        }
     }
 
     func ejectSource() {
@@ -182,9 +194,23 @@ final class AppModel {
                             sourceVolume: sourceVolume, files: scanResult.files, destinations: destinations)
     }
 
-    private func chooseFolder(prompt: String) -> URL? {
+    private func selectSource(_ url: URL, knownVolume: VolumeIdentity? = nil) {
+        sourceAccess = nil
+        sourceURL = url
+        sourceVolume = knownVolume
+            ?? Self.volumeIdentity(for: url, defaultName: url.lastPathComponent, removable: true)
+        Task { try? await bookmarkStore.save(url: url, key: "last-source") }
+        transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
+        scan()
+    }
+
+    private func chooseFolder(prompt: String, initialDirectory: URL? = nil,
+                              message: String? = nil, confirmButtonTitle: String? = nil) -> URL? {
         let panel = NSOpenPanel()
         panel.title = prompt
+        panel.directoryURL = initialDirectory
+        panel.message = message
+        if let confirmButtonTitle { panel.prompt = confirmButtonTitle }
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true

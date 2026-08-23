@@ -51,7 +51,7 @@ struct TransferView: View {
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
                 if let progress = model.progress { PhaseProgress(progress: progress) }
-                if let outcome = model.outcome { OutcomeView(outcome: outcome) }
+                if let outcome = model.outcome { OutcomeView(outcome: outcome, model: model) }
             }.padding(24)
         }
         .navigationTitle("CardVault")
@@ -181,6 +181,7 @@ private struct PhaseProgress: View {
 
 private struct OutcomeView: View {
     let outcome: TransferOutcome
+    @Bindable var model: AppModel
     var body: some View {
         GroupBox("Result") {
             VStack(alignment: .leading, spacing: 8) {
@@ -193,13 +194,8 @@ private struct OutcomeView: View {
                     ForEach(outcome.destinations) { destination in
                         if let url = destination.finalURL {
                             Button("Show \(destination.label) in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                            Button("Open in SDelight") {
-                                guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.dennisfriedrichsen.SDelight")
-                                    ?? (FileManager.default.fileExists(atPath: "/Applications/SDelight.app") ? URL(filePath: "/Applications/SDelight.app") : nil)
-                                else { return }
-                                NSWorkspace.shared.open([url], withApplicationAt: app,
-                                                        configuration: NSWorkspace.OpenConfiguration())
-                            }
+                            Button("Launch SDelight") { model.launchSDelight(for: url) }
+                                .help("SDelight requires you to choose the verified folder in its own folder picker.")
                         }
                     }
                 }

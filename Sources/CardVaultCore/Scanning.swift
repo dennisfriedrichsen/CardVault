@@ -40,16 +40,37 @@ public struct ScanResult: Sendable {
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
 }
 
+public enum SourceScanError: Error, Equatable, Sendable, LocalizedError {
+    case sourceUnavailable
+
+    public var errorDescription: String? {
+        "The source is unavailable or unreadable."
+    }
+}
+
 public struct SourceScanner: Sendable {
     private let classifier: MediaClassifier
     public init(classifier: MediaClassifier = MediaClassifier()) { self.classifier = classifier }
 
     public func scan(root: URL, mode: TransferMode) throws -> ScanResult {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              fileManager.isReadableFile(atPath: root.path) else {
+            throw SourceScanError.sourceUnavailable
+        }
+
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
-        guard let enumerator = FileManager.default.enumerator(
+        var enumerationError: Error?
+        guard let enumerator = fileManager.enumerator(
             at: root, includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return ScanResult(files: [], excludedFiles: [], rawJPEGPairCount: 0) }
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else { throw SourceScanError.sourceUnavailable }
 
         let canonicalRoot = root.resolvingSymlinksInPath()
         var included: [SourceFile] = []
@@ -73,6 +94,7 @@ public struct SourceScanner: Sendable {
             let stem = (url.deletingPathExtension().lastPathComponent).lowercased()
             stems[directory + "/" + stem, default: []].insert(kind)
         }
+        if enumerationError != nil { throw SourceScanError.sourceUnavailable }
         let pairs = stems.values.count { $0.contains(.raw) && ($0.contains(.jpeg) || $0.contains(.heif)) }
         return ScanResult(files: included.sorted { $0.relativePath < $1.relativePath },
                           excludedFiles: excluded.sorted { $0.relativePath < $1.relativePath },

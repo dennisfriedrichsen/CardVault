@@ -91,6 +91,24 @@ struct CoreTests {
         }
     }
 
+    @Test("Scanner reports a missing source instead of an empty card")
+    func scanMissingSource() {
+        let missing = FileManager.default.temporaryDirectory
+            .appending(path: "CardVaultTests-missing-\(UUID().uuidString)")
+        #expect(throws: SourceScanError.sourceUnavailable) {
+            try SourceScanner().scan(root: missing, mode: .preserveCard)
+        }
+    }
+
+    @Test("Scanner accepts an accessible empty source")
+    func scanEmptySource() throws {
+        try withTemporaryDirectorySync { root in
+            let result = try SourceScanner().scan(root: root, mode: .preserveCard)
+            #expect(result.files.isEmpty)
+            #expect(result.excludedFiles.isEmpty)
+        }
+    }
+
     @Test("Preflight prevents selecting a destination inside the source")
     func destinationInsideSource() throws {
         try withTemporaryDirectorySync { root in
