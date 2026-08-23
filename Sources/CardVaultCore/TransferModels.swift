@@ -1,0 +1,175 @@
+import Foundation
+
+public enum TransferMode: String, Codable, CaseIterable, Sendable {
+    case preserveCard
+    case mediaOnly
+    case customDestination
+
+    public var title: String {
+        switch self {
+        case .preserveCard: "Preserve Card"
+        case .mediaOnly: "Media Only"
+        case .customDestination: "Custom Destination"
+        }
+    }
+}
+
+public enum MediaKind: String, Codable, Sendable {
+    case raw, jpeg, heif, tiff, png, video, sidecar, other
+    public var isRecognizedMedia: Bool { self != .other }
+}
+
+public enum TransferState: String, Codable, CaseIterable, Sendable {
+    case discoveringSource, scanning, ready, preflighting, awaitingConfirmation
+    case copying, copyComplete, verifying, verified, interrupted, needsAttention
+    case partiallySuccessful, failed, cancelled, safeToEject
+}
+
+public enum TransferStateError: Error, Equatable, Sendable {
+    case invalidTransition(from: TransferState, to: TransferState)
+}
+
+public struct TransferStateMachine: Sendable {
+    public private(set) var state: TransferState
+
+    public init(state: TransferState = .discoveringSource) { self.state = state }
+
+    public mutating func transition(to next: TransferState) throws {
+        guard Self.validTransitions[state, default: []].contains(next) else {
+            throw TransferStateError.invalidTransition(from: state, to: next)
+        }
+        state = next
+    }
+
+    public static let validTransitions: [TransferState: Set<TransferState>] = [
+        .discoveringSource: [.scanning, .needsAttention, .cancelled],
+        .scanning: [.ready, .interrupted, .failed, .cancelled],
+        .ready: [.preflighting, .scanning, .cancelled],
+        .preflighting: [.awaitingConfirmation, .needsAttention, .failed, .cancelled],
+        .awaitingConfirmation: [.copying, .ready, .cancelled],
+        .copying: [.copyComplete, .interrupted, .needsAttention, .failed, .cancelled],
+        .copyComplete: [.verifying, .interrupted, .failed],
+        .verifying: [.verified, .partiallySuccessful, .interrupted, .needsAttention, .failed, .cancelled],
+        .verified: [.safeToEject],
+        .partiallySuccessful: [.safeToEject, .copying, .verifying],
+        .interrupted: [.copying, .verifying, .needsAttention, .cancelled],
+        .needsAttention: [.copying, .verifying, .cancelled, .failed],
+        .failed: [.safeToEject],
+        .cancelled: [.safeToEject],
+        .safeToEject: []
+    ]
+}
+
+public struct VolumeIdentity: Codable, Hashable, Sendable {
+    public var volumeUUID: UUID?
+    public var resourceIdentifier: String?
+    public var displayName: String
+    public var fileSystem: String
+    public var isRemovable: Bool
+    public var isLocal: Bool
+    public var physicalStoreIdentifier: String?
+
+    public init(volumeUUID: UUID? = nil, resourceIdentifier: String? = nil,
+                displayName: String, fileSystem: String = "Unknown",
+                isRemovable: Bool = false, isLocal: Bool = true,
+                physicalStoreIdentifier: String? = nil) {
+        self.volumeUUID = volumeUUID
+        self.resourceIdentifier = resourceIdentifier
+        self.displayName = displayName
+        self.fileSystem = fileSystem
+        self.isRemovable = isRemovable
+        self.isLocal = isLocal
+        self.physicalStoreIdentifier = physicalStoreIdentifier
+    }
+}
+
+public struct SourceFile: Codable, Hashable, Sendable, Identifiable {
+    public var id: String { relativePath }
+    public let relativePath: String
+    public let byteCount: Int64
+    public let creationDate: Date?
+    public let modificationDate: Date?
+    public let mediaKind: MediaKind
+
+    public init(relativePath: String, byteCount: Int64, creationDate: Date? = nil,
+                modificationDate: Date? = nil, mediaKind: MediaKind) {
+        self.relativePath = relativePath
+        self.byteCount = byteCount
+        self.creationDate = creationDate
+        self.modificationDate = modificationDate
+        self.mediaKind = mediaKind
+    }
+}
+
+public struct DestinationPlan: Codable, Hashable, Sendable, Identifiable {
+    public let id: UUID
+    public var label: String
+    public var rootPath: String
+    public var volume: VolumeIdentity
+
+    public init(id: UUID = UUID(), label: String, rootPath: String, volume: VolumeIdentity) {
+        self.id = id
+        self.label = label
+        self.rootPath = rootPath
+        self.volume = volume
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, label, volume }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        volume = try container.decode(VolumeIdentity.self, forKey: .volume)
+        rootPath = "" // Resolved from an app-scoped bookmark, never from portable JSON.
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(label, forKey: .label)
+        try container.encode(volume, forKey: .volume)
+    }
+}
+
+public struct TransferPlan: Codable, Sendable {
+    public let id: UUID
+    public var name: String
+    public var mode: TransferMode
+    public var sourceRootPath: String
+    public var sourceVolume: VolumeIdentity
+    public var files: [SourceFile]
+    public var destinations: [DestinationPlan]
+
+    public init(id: UUID = UUID(), name: String, mode: TransferMode,
+                sourceRootPath: String, sourceVolume: VolumeIdentity,
+                files: [SourceFile], destinations: [DestinationPlan]) {
+        self.id = id
+        self.name = name
+        self.mode = mode
+        self.sourceRootPath = sourceRootPath
+        self.sourceVolume = sourceVolume
+        self.files = files
+        self.destinations = destinations
+    }
+
+    public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
+}
+
+public enum CopyState: String, Codable, Sendable { case pending, copying, copied, skipped, failed }
+public enum VerificationResult: String, Codable, Sendable { case pending, verified, mismatch, failed }
+
+public struct DestinationFileResult: Codable, Hashable, Sendable {
+    public var copyState: CopyState
+    public var verification: VerificationResult
+    public var destinationChecksum: String?
+    public var error: String?
+
+    public init(copyState: CopyState = .pending, verification: VerificationResult = .pending,
+                destinationChecksum: String? = nil, error: String? = nil) {
+        self.copyState = copyState
+        self.verification = verification
+        self.destinationChecksum = destinationChecksum
+        self.error = error
+    }
+}
