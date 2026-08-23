@@ -15,5 +15,5 @@ only copy of valuable work at risk.
 7. During separate transfers disconnect the source, primary, and backup; exhaust destination space;
    revoke folder access; sleep/wake the Mac; quit/force-quit between files; and relaunch. Confirm an
    incomplete manifest remains, verified files are not overwritten, and retry begins at a file boundary.
-8. After a verified transfer, use Show in Finder and optional SDelight handoff. Eject only when the UI
-   says Safe to eject. Confirm the UI never says that the card is safe to erase.
+8. After a verified transfer, use Show in Finder. Eject only when the UI says Safe to eject. Confirm
+   the UI never says that the card is safe to erase.

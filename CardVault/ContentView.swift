@@ -22,6 +22,12 @@ struct ContentView: View {
             get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } }
         )) { Button("OK") { model.errorMessage = nil } } message: { Text(model.errorMessage ?? "") }
         .task { await model.refresh() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+            Task { await model.refreshDetectedVolumes() }
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+            Task { await model.refreshDetectedVolumes() }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Choose Source", systemImage: "sdcard") { model.chooseSource() }
@@ -50,8 +56,9 @@ struct TransferView: View {
                 }
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
+                if model.outcome == nil { startTransferButton }
                 if let progress = model.progress { PhaseProgress(progress: progress) }
-                if let outcome = model.outcome { OutcomeView(outcome: outcome, model: model) }
+                if let outcome = model.outcome { OutcomeView(outcome: outcome) }
             }.padding(24)
         }
         .navigationTitle("CardVault")
@@ -71,6 +78,22 @@ struct TransferView: View {
                 Button("Eject Card", systemImage: "eject.fill") { model.ejectSource() }
             }
         }
+    }
+
+    private var startTransferButton: some View {
+        Button {
+            model.beginTransfer()
+        } label: {
+            Label("Start Transfer", systemImage: "arrow.right.circle.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(model.preflight?.canProceed != true || model.isWorking)
+        .help("Start Transfer (Command-Return)")
+        .accessibilityHint("Copies and verifies the selected files at each destination.")
     }
 }
 
@@ -154,11 +177,19 @@ private struct PreflightSummary: View {
                         .foregroundStyle(issue.severity == .blocking ? .red : .orange)
                 }
                 ForEach(result.destinations) { destination in
-                    Text("\(destination.label): \(destination.fileSystem) · \(destination.requiredBytes, format: .byteCount(style: .file)) required")
+                    Text(destinationDescription(destination))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func destinationDescription(_ destination: DestinationPreflight) -> String {
+        let required = destination.requiredBytes.formatted(.byteCount(style: .file))
+        guard let available = destination.availableBytes else {
+            return "\(destination.label): \(destination.fileSystem) · capacity unavailable · \(required) required"
+        }
+        return "\(destination.label): \(destination.fileSystem) · \(available.formatted(.byteCount(style: .file))) available · \(required) required"
     }
 }
 
@@ -181,7 +212,6 @@ private struct PhaseProgress: View {
 
 private struct OutcomeView: View {
     let outcome: TransferOutcome
-    @Bindable var model: AppModel
     var body: some View {
         GroupBox("Result") {
             VStack(alignment: .leading, spacing: 8) {
@@ -194,8 +224,6 @@ private struct OutcomeView: View {
                     ForEach(outcome.destinations) { destination in
                         if let url = destination.finalURL {
                             Button("Show \(destination.label) in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                            Button("Launch SDelight") { model.launchSDelight(for: url) }
-                                .help("SDelight requires you to choose the verified folder in its own folder picker.")
                         }
                     }
                 }

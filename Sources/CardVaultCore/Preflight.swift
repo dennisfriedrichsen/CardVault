@@ -24,7 +24,18 @@ public struct PreflightResult: Sendable {
 
 public struct TransferPreflightService: Sendable {
     public var safetyMarginBytes: Int64
-    public init(safetyMarginBytes: Int64 = 1_073_741_824) { self.safetyMarginBytes = safetyMarginBytes }
+    private let capacityProvider: @Sendable (URL) -> Int64?
+
+    public init(safetyMarginBytes: Int64 = 1_073_741_824) {
+        self.safetyMarginBytes = safetyMarginBytes
+        capacityProvider = Self.availableCapacity
+    }
+
+    init(safetyMarginBytes: Int64 = 1_073_741_824,
+         capacityProvider: @escaping @Sendable (URL) -> Int64?) {
+        self.safetyMarginBytes = safetyMarginBytes
+        self.capacityProvider = capacityProvider
+    }
 
     public func validate(_ plan: TransferPlan) -> PreflightResult {
         var issues: [PreflightIssue] = []
@@ -42,7 +53,7 @@ public struct TransferPreflightService: Sendable {
                                 message: "Primary and backup are on the same physical device and are not independent copies."))
         }
         var destinationChecks: [DestinationPreflight] = []
-        for destination in plan.destinations {
+        for (index, destination) in plan.destinations.enumerated() {
             let url = URL(filePath: destination.rootPath).standardizedFileURL
             if url.path == source.path || url.path.hasPrefix(source.path + "/") {
                 issues.append(.init(code: "destination-in-source", severity: .blocking,
@@ -52,16 +63,18 @@ public struct TransferPreflightService: Sendable {
                 issues.append(.init(code: "source-in-destination", severity: .blocking,
                                     message: "The source is inside \(destination.label)."))
             }
-            let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            let available = values?.volumeAvailableCapacityForImportantUsage
+            let available = capacityProvider(url)
             let required = plan.totalBytes + safetyMarginBytes
             if let available, available < required {
                 issues.append(.init(code: "insufficient-space", severity: .blocking,
-                                    message: "\(destination.label) needs more free space, including the safety margin."))
+                                    message: "\(destination.label) has insufficient free space (\(available.formatted(.byteCount(style: .file))) available; \(required.formatted(.byteCount(style: .file))) required)."))
             }
-            if !destination.volume.isLocal {
+            if !destination.volume.isLocal && index == 0 {
                 issues.append(.init(code: "non-local", severity: .blocking,
-                                    message: "\(destination.label) is not a directly attached local destination."))
+                                    message: "Primary must be a directly attached local destination. Network storage can be used for Backup."))
+            } else if !destination.volume.isLocal {
+                issues.append(.init(code: "network-backup", severity: .warning,
+                                    message: "Backup is on network storage. Keep it mounted until copying and verification finish."))
             }
             if destination.volume.fileSystem.localizedCaseInsensitiveContains("exFAT") {
                 let forbidden = CharacterSet(charactersIn: "<>:\"\\|?*")
@@ -84,6 +97,24 @@ public struct TransferPreflightService: Sendable {
         }
         issues += collisionIssues(files: plan.files, destinations: plan.destinations)
         return PreflightResult(destinations: destinationChecks, issues: issues)
+    }
+
+    private static func availableCapacity(at url: URL) -> Int64? {
+        var reported: [Int64] = []
+        if let values = try? url.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ]) {
+            if let capacity = values.volumeAvailableCapacityForImportantUsage { reported.append(capacity) }
+            if let capacity = values.volumeAvailableCapacity { reported.append(Int64(capacity)) }
+        }
+        if let attributes = try? FileManager.default.attributesOfFileSystem(forPath: url.path),
+           let capacity = attributes[.systemFreeSize] as? NSNumber {
+            reported.append(capacity.int64Value)
+        }
+
+        if let positive = reported.filter({ $0 > 0 }).max() { return positive }
+        return reported.contains(0) ? 0 : nil
     }
 
     private func collisionIssues(files: [SourceFile], destinations: [DestinationPlan]) -> [PreflightIssue] {

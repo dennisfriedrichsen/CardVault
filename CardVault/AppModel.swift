@@ -103,7 +103,7 @@ final class AppModel {
     }
 
     func refresh() async {
-        detectedVolumes = await volumeDiscovery.mountedVolumes().filter { $0.identity.isRemovable }
+        await refreshDetectedVolumes()
         history = await historyStore.all()
         if sourceURL == nil, let access = try? await bookmarkStore.resolve(key: "last-source") {
             sourceAccess = access
@@ -123,6 +123,10 @@ final class AppModel {
         updatePreflight()
     }
 
+    func refreshDetectedVolumes() async {
+        detectedVolumes = await volumeDiscovery.mountedVolumes().filter { $0.identity.isRemovable }
+    }
+
     func selectDetectedVolume(_ volume: MountedVolume) {
         guard let url = chooseFolder(
             prompt: "Allow Access to \(volume.identity.displayName)",
@@ -136,22 +140,12 @@ final class AppModel {
 
     func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
 
-    func launchSDelight(for url: URL) {
-        guard let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.friedrichsenweb.SDelight")
-                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.dennisfriedrichsen.SDelight")
-                ?? (FileManager.default.fileExists(atPath: "/Applications/SDelight.app") ? URL(filePath: "/Applications/SDelight.app") : nil)
-        else { errorMessage = "SDelight is not installed. The verified files remain available in Finder."; return }
-        Task {
-            do {
-                _ = try await NSWorkspace.shared.openApplication(
-                    at: application,
-                    configuration: NSWorkspace.OpenConfiguration()
-                )
-                message = "SDelight opened — choose \(url.lastPathComponent) in SDelight's folder picker."
-            } catch {
-                present(error, operation: "Opening SDelight")
-            }
+    func revealManifest(for entry: TransferHistoryEntry) {
+        guard let path = entry.manifestPaths.first(where: FileManager.default.fileExists(atPath:)) else {
+            errorMessage = "The transfer manifest is unavailable. Reconnect one of the transfer destinations and try again."
+            return
         }
+        reveal(URL(filePath: path))
     }
 
     func ejectSource() {

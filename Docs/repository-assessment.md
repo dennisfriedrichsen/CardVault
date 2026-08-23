@@ -6,7 +6,7 @@ The initial commit tracked only `LICENSE` and a two-line README describing an iP
 Empty local directories named `CardVault`, `CardVaultTests`, and `CardVault.xcodeproj` contained no
 project file, source, tests, settings, entitlements, assets, or dependencies. There was therefore no
 existing functionality, architecture, model, deployment target, Swift version, warning, placeholder,
-reusable CardVault code, or SDelight feature to preserve/refactor/remove. The iPhone description was
+reusable CardVault code or feature to preserve/refactor/remove. The iPhone description was
 removed because the required product is a native macOS utility.
 
 ## Requirement comparison
@@ -26,7 +26,7 @@ from SwiftUI from the first source file.
 6. Add exclusive file-boundary copy, source/destination SHA-256, flush/close, size checks, and finalization.
 7. Add independent dual-destination outcomes and deterministic filesystem fault injection.
 8. Add incomplete-transfer discovery and whole-file retry without overwriting verified artifacts.
-9. Add native macOS transfer/history UI, mounted-volume discovery, bookmarks, Finder/SDelight handoff, and ejection.
+9. Add native macOS transfer/history UI, mounted-volume discovery, bookmarks, Finder reveal, and ejection.
 10. Add reliability tests, schema/build/manual-test documentation, then run Debug tests and a signed Release build.
 
 ## Data-integrity decisions

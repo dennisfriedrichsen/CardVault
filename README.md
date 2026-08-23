@@ -12,10 +12,8 @@ rereads every destination file, verifies SHA-256, records portable manifests and
 supports safe ejection. It never deletes, renames, reorganizes, or writes metadata to a source. It
 never erases/formats media and never claims that a card is safe to erase.
 
-Photo browsing, culling, ratings, histograms, pixel inspection, comparison, and analytics belong to
-SDelight. SDelight is optional; a verified destination can be revealed in Finder, and SDelight can be
-launched when installed. SDelight requires the folder to be selected in its own picker because it does
-not register folders as documents that another macOS app can open.
+Photo browsing, culling, ratings, histograms, pixel inspection, comparison, and analytics are outside
+CardVault's product boundary. A verified destination can be revealed in Finder.
 
 ## Architecture
 
@@ -25,14 +23,15 @@ not register folders as documents that another macOS app can open.
 - `TransferCoordinator` reads sources predictably and sequentially, while keeping primary and backup
   outcomes independent. Filesystem operations run behind an actor with deterministic fault injection.
 - `CardVault` is the macOS SwiftUI presentation layer. The navigation split view, Mac toolbar,
-  keyboard commands, folder panels, phased progress, history table, Finder reveal, SDelight launch,
-  and eject action observe core results without owning durable truth.
+  keyboard commands, folder panels, phased progress, history table with double-click manifest reveal,
+  Finder reveal, and eject action observe core results without owning durable truth.
 - `.cardvault/transfer-manifest.json` is the authoritative portable record. The local history is only
   an index. See [manifest schema v1](Docs/manifest-schema-v1.md).
 
 Strict concurrency checking is enabled. The app target uses App Sandbox with user-selected read/write
 folders and app-scoped security bookmarks. The core and tests do not require a physical SD card.
-Choosing a detected removable volume opens a macOS permission panel rooted at that volume; access is
+The detected-volumes menu updates as removable volumes are mounted or unmounted. Choosing a detected
+removable volume opens a macOS permission panel rooted at that volume; access is
 saved for later launches with a security-scoped bookmark.
 
 ## Transfer behavior
@@ -57,7 +56,10 @@ safe to erase.
   limits. Preflight blocks case-folding collisions and reports capacity/local-volume limitations.
 - Destination identity uses public volume UUID/resource metadata when available, not display names or
   mount paths alone. Two folders on one physical-volume identity produce a non-independence warning.
-- Network/non-local destinations are rejected in V1. Finalization never assumes cross-volume moves.
+- The primary destination must be local. An optional network/NFS backup is supported and must remain
+  mounted through copy and verification. Capacity detection falls back to filesystem statistics when
+  a network volume does not report macOS's preferred capacity value. Finalization never assumes
+  cross-volume moves.
 
 ## Build and test
 

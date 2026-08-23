@@ -135,6 +135,45 @@ struct CoreTests {
         }
     }
 
+    @Test("Preflight permits an NFS backup and reports its usable capacity")
+    func networkBackup() throws {
+        try withTemporaryDirectorySync { root in
+            let primary = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            let backup = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: primary); try? FileManager.default.removeItem(at: backup) }
+            let files = [SourceFile(relativePath: "photo.raw", byteCount: 1_000, mediaKind: .raw)]
+            var plan = makePlan(source: root, destinations: [primary, backup], files: files)
+            plan.destinations[1].volume.fileSystem = "Network File System (NFS)"
+            plan.destinations[1].volume.isLocal = false
+            let service = TransferPreflightService(safetyMarginBytes: 100) { _ in 5_000 }
+
+            let result = service.validate(plan)
+
+            #expect(result.canProceed)
+            #expect(!result.issues.contains { $0.code == "insufficient-space" || $0.code == "non-local" })
+            #expect(result.issues.contains { $0.code == "network-backup" && $0.severity == .warning })
+            #expect(result.destinations[1].availableBytes == 5_000)
+        }
+    }
+
+    @Test("Preflight still requires a local primary")
+    func networkPrimary() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            var plan = makePlan(source: root, destinations: [destination], files: [])
+            plan.destinations[0].volume.fileSystem = "Network File System (NFS)"
+            plan.destinations[0].volume.isLocal = false
+
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 5_000 }.validate(plan)
+
+            #expect(result.issues.contains { $0.code == "non-local" && $0.severity == .blocking })
+        }
+    }
+
     @Test("Case-folding collisions block case-insensitive destinations")
     func caseCollision() throws {
         try withTemporaryDirectorySync { root in
