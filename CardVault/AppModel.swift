@@ -24,6 +24,10 @@ final class AppModel {
     var isFinalizing = false
     var outcome: TransferOutcome?
     var history: [TransferHistoryEntry] = []
+    /// History detail is loaded for the selected entry only, because assembling
+    /// it reads a manifest off a drive that may be spinning up.
+    var historySelection: TransferHistoryEntry.ID?
+    var historyDetail: HistoryDetail?
     var detectedVolumes: [MountedVolume] = []
     var isWorking = false
     var message = "Choose an SD card or source folder to begin."
@@ -46,12 +50,17 @@ final class AppModel {
     private let bookmarkStore: SecurityScopedBookmarkStore
     private let historyStore: TransferHistoryStore
     private let recoveryCoordinator = RecoveryCoordinator()
+    private let historyInspector = TransferHistoryInspector()
+    private let handoff = ExternalAppHandoff(locator: WorkspaceApplicationLocator())
     private var sourceAccess: SecurityScopedAccess?
     private var primaryAccess: SecurityScopedAccess?
     private var backupAccess: SecurityScopedAccess?
     /// Security-scoped access has to outlive the scan that opened it, or the
     /// URLs stop resolving the moment the last reference goes away.
     private var recoveryAccesses: [SecurityScopedAccess] = []
+    /// Destination roots the app can currently reach, from the same bookmarks
+    /// recovery resolves. History reconciliation reads manifests under these.
+    private var knownDestinationRoots: [URL] = []
 
     init() {
         let supportBase = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -139,6 +148,8 @@ final class AppModel {
         await refreshDetectedVolumes()
         history = await historyStore.all()
         await discoverUnfinishedTransfers()
+        await reconcileHistory()
+        await refreshHistoryDetail()
         if sourceURL == nil, let access = try? await bookmarkStore.resolve(key: BookmarkKey.lastSource) {
             sourceAccess = access
             sourceURL = access.url
@@ -200,6 +211,81 @@ final class AppModel {
         }
     }
 
+    // MARK: - Transfer history
+
+    /// Loads the selected entry's detail: destination availability now, and the
+    /// authoritative manifest read back from whichever destination is connected.
+    func refreshHistoryDetail() async {
+        guard let id = historySelection, let entry = history.first(where: { $0.id == id }) else {
+            historyDetail = nil
+            return
+        }
+        let detail = await historyInspector.detail(for: entry)
+        // The selection can move while a sleeping drive spins up.
+        guard historySelection == detail.entry.id else { return }
+        historyDetail = detail
+    }
+
+    func selectHistoryEntry(_ id: TransferHistoryEntry.ID?) {
+        historySelection = id
+        if historyDetail?.entry.id != id { historyDetail = nil }
+        Task { await refreshHistoryDetail() }
+    }
+
+    func reveal(_ status: HistoryDestinationStatus) {
+        guard let root = status.transferRoot else {
+            errorMessage = status.revealUnavailableReason
+            return
+        }
+        reveal(root)
+    }
+
+    /// Opens the portable manifest itself. It is plain JSON on purpose: the
+    /// record has to be readable without CardVault, so inspecting it is handed
+    /// to whatever the user already reads JSON with.
+    func openManifest(_ status: HistoryDestinationStatus) {
+        guard let url = status.manifestURL else {
+            errorMessage = status.manifestUnavailableReason
+            return
+        }
+        if !NSWorkspace.shared.open(url) { reveal(url) }
+    }
+
+    var handoffName: String { handoff.target.displayName }
+
+    func handoffAvailability(for status: HistoryDestinationStatus) -> HandoffAvailability {
+        handoff.availability(for: status)
+    }
+
+    /// Hands a verified, connected destination folder to the companion app.
+    /// Nothing is copied, moved, or removed, and the transfer's record is not
+    /// touched — this only opens a folder somewhere else.
+    func handOff(_ status: HistoryDestinationStatus) {
+        let availability = handoffAvailability(for: status)
+        guard let applicationURL = availability.applicationURL, let root = status.transferRoot else {
+            errorMessage = availability.explanation
+            return
+        }
+        let name = handoff.target.displayName
+        NSWorkspace.shared.open([root], withApplicationAt: applicationURL,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard let error else { return }
+            let reason = error.localizedDescription
+            Task { @MainActor [weak self] in
+                self?.errorMessage = "\(name) could not open \(status.label): \(reason)"
+            }
+        }
+    }
+
+    /// The manifests on the drives are authoritative, so an index that is
+    /// missing or behind is rebuilt from them rather than trusted.
+    private func reconcileHistory() async {
+        let rebuilt = await historyInspector.rebuildEntries(fromDestinationRoots: knownDestinationRoots)
+        guard !rebuilt.isEmpty else { return }
+        _ = try? await historyStore.merge(rebuilt)
+        history = await historyStore.all()
+    }
+
     // MARK: - Relaunch recovery
 
     /// Rebuilds each interrupted transfer's own roots from its own bookmarks.
@@ -229,6 +315,7 @@ final class AppModel {
             roots.append(access.url)
         }
         recoveryAccesses = accesses
+        knownDestinationRoots = roots
         let scan = await recoveryCoordinator.scan(destinationRoots: roots, sourceRoots: sources,
                                                   transferDestinationRoots: destinations)
         recovery = scan
@@ -321,11 +408,17 @@ final class AppModel {
 
     private func recordHistory(from outcome: TransferOutcome?) async {
         guard let outcome else { return }
-        let paths = outcome.destinations.compactMap { $0.finalURL?.appending(path: ".cardvault/transfer-manifest.json") }
-        guard let first = paths.first,
-              let manifest = try? await ManifestStore().load(from: first) else { return }
-        try? await historyStore.add(.init(manifest: manifest, manifestPaths: paths.map(\.path)))
+        // Keyed by destination, so a manifest path is never recorded against
+        // the wrong drive.
+        let paths = outcome.destinations.reduce(into: [UUID: String]()) { paths, destination in
+            guard let url = destination.finalURL else { return }
+            paths[destination.id] = TransferLayout.manifestURL(inStaging: url).path
+        }
+        guard let first = paths.values.first,
+              let manifest = try? await ManifestStore().load(from: URL(filePath: first)) else { return }
+        try? await historyStore.add(.init(manifest: manifest, manifestPaths: paths))
         history = await historyStore.all()
+        await refreshHistoryDetail()
     }
 
     private func receive(_ update: TransferProgress) {

@@ -23,10 +23,12 @@ CardVault's product boundary. A verified destination can be revealed in Finder.
 - `TransferCoordinator` reads sources predictably and sequentially, while keeping primary and backup
   outcomes independent. Filesystem operations run behind an actor with deterministic fault injection.
 - `CardVault` is the macOS SwiftUI presentation layer. The navigation split view, Mac toolbar,
-  keyboard commands, folder panels, phased progress, history table with double-click manifest reveal,
+  keyboard commands, folder panels, phased progress, history table with a per-transfer detail view,
   Finder reveal, and eject action observe core results without owning durable truth.
 - `.cardvault/transfer-manifest.json` is the authoritative portable record. The local history is only
-  an index. See [manifest schema v1](Docs/manifest-schema-v1.md).
+  an index, and is rebuilt from the manifests on connected drives when the two disagree. See
+  [manifest schema v1](Docs/manifest-schema-v1.md) and
+  [transfer history and availability](Docs/transfer-history.md).
 
 Strict concurrency checking is enabled. The app target uses App Sandbox with user-selected read/write
 folders and app-scoped security bookmarks. The core and tests do not require a physical SD card.
@@ -87,6 +89,13 @@ Short reads and writes, disconnections, exhausted space, permission and bookmark
 corruption, source mutation, sleep/wake, cancellation, termination between manifest updates, and
 failures on either side of finalization are all reproduced deterministically in temporary
 directories. See [fault injection and interruption coverage](Docs/fault-injection-coverage.md).
+
+History detail reports each destination's own verification counts, whether that drive is connected
+right now, and the differences between the local index and the portable manifest. Verification and
+availability are separate facts: a drive that is not connected is never presented as unverified. A
+connected destination can be revealed in Finder, its manifest opened for inspection, and — when it is
+fully verified — handed to the optional SDelight companion app. Unavailable actions state their
+reason. See [transfer history and availability](Docs/transfer-history.md).
 
 Progress throttling, transfer-rate and remaining-time estimates, and the internal tuning knobs behind
 them are described in [progress and performance](Docs/progress-performance.md), along with the
