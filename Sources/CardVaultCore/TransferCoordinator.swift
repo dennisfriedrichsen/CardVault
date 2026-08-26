@@ -94,12 +94,12 @@ public actor TransferCoordinator {
         } catch is CancellationError {
             manifest.state = .cancelled
             manifest.errors.append("Transfer cancelled at a safe file boundary.")
-            try? await persist(manifest, locations: locations)
+            await persistBestEffort(manifest, locations: locations)
             throw CancellationError()
         } catch {
             manifest.state = .interrupted
             manifest.errors.append(String(describing: error))
-            try? await persist(manifest, locations: locations)
+            await persistBestEffort(manifest, locations: locations)
             throw error
         }
     }
@@ -133,6 +133,17 @@ public actor TransferCoordinator {
 
     private func persist(_ manifest: TransferManifest, locations: [Location]) async throws {
         for location in locations { try await manifestStore.save(manifest, to: location.manifestURL) }
+    }
+
+    /// Error-path persistence, which must never make things worse than the
+    /// failure already did. A staging tree that is no longer there is left
+    /// alone: finalisation may already have moved it, and recreating it would
+    /// offer the user a transfer that has in fact finished. A destination that
+    /// cannot take the record keeps the last one it accepted.
+    private func persistBestEffort(_ manifest: TransferManifest, locations: [Location]) async {
+        for location in locations where await fileSystem.exists(location.stagingRoot) {
+            try? await manifestStore.save(manifest, to: location.manifestURL)
+        }
     }
 
     // MARK: - Progress
