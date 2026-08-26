@@ -2,40 +2,6 @@ import AppKit
 import CardVaultCore
 import SwiftUI
 
-struct HistoryView: View {
-    @Bindable var model: AppModel
-    @State private var selection: TransferHistoryEntry.ID?
-
-    var body: some View {
-        Group {
-            if model.history.isEmpty {
-                ContentUnavailableView("No Transfer History", systemImage: "clock.arrow.circlepath",
-                                       description: Text("Verified transfers will appear here. Portable manifests remain authoritative."))
-            } else {
-                Table(model.history, selection: $selection) {
-                    TableColumn("Transfer") { Text($0.name) }
-                    TableColumn("Date") { Text($0.date, format: .dateTime.year().month().day().hour().minute()) }
-                    TableColumn("Files") { Text($0.totalFiles, format: .number) }
-                    TableColumn("Size") { Text($0.totalBytes, format: .byteCount(style: .file)) }
-                    TableColumn("State") { Text($0.finalState.rawValue) }
-                }
-                .contextMenu(forSelectionType: TransferHistoryEntry.ID.self) { ids in
-                    if let entry = entry(in: ids) {
-                        Button("Show Manifest in Finder") { model.revealManifest(for: entry) }
-                    }
-                } primaryAction: { ids in
-                    if let entry = entry(in: ids) { model.revealManifest(for: entry) }
-                }
-            }
-        }.navigationTitle("Transfer History")
-    }
-
-    private func entry(in ids: Set<TransferHistoryEntry.ID>) -> TransferHistoryEntry? {
-        guard let id = ids.first else { return nil }
-        return model.history.first { $0.id == id }
-    }
-}
-
 struct SettingsView: View {
     var body: some View {
         Form {
