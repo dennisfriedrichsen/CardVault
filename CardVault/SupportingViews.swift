@@ -24,11 +24,22 @@ struct CardVaultCommands: Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About CardVault") { showAboutPanel() }
         }
+        // Every shortcut the window offers also lives in a menu: a shortcut that
+        // exists only on a toolbar button cannot be discovered, and Full Keyboard
+        // Access users reach the menu bar first.
         CommandGroup(after: .newItem) {
             Button("Choose Source…") { model.chooseSource() }.keyboardShortcut("o", modifiers: .command)
+            Button("Choose Primary Destination…") { model.choosePrimary() }
+                .keyboardShortcut("d", modifiers: .command)
+            Button("Choose Backup Destination…") { model.chooseBackup() }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            Divider()
             Button("Start Transfer") { model.beginTransfer() }
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(model.preflight?.canProceed != true || model.isWorking)
+            Button("Eject Card") { model.ejectSource() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(model.outcome?.safeToEject != true)
         }
     }
 

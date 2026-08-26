@@ -100,3 +100,9 @@ recovery can reach a months-old transfer's roots after the last-used selections 
 `Docs/` carries the contracts worth reading before changing the matching area:
 `manifest-schema-v1.md`, `transfer-history.md`, `fault-injection-coverage.md`,
 `progress-performance.md`, and `manual-removable-media-test.md` (the opt-in real-card procedure).
+
+`ui-state-audit.md` is the accessibility and layout audit of the principal UI states, with
+`Docs/ui-states/` as its reference screenshots and `ui-state-capture.md` as the one command that
+regenerates them. Changing anything the user sees means re-running that capture and reviewing the
+diff. The states themselves are named in `StatusPresentation.swift` and posed by
+`UIStateFixtures.swift`; a new user-visible state belongs in both, or it drops out of the audit.
