@@ -102,7 +102,10 @@ struct HistoryDetailView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Label(entry.finalState.rawValue, systemImage: entry.isFullyVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+            // The state name is the fact; the symbol repeats it; the colour only
+            // emphasises it.
+            Label("\(entry.isFullyVerified ? "Verified" : "Not fully verified") · \(entry.finalState.rawValue)",
+                  systemImage: entry.isFullyVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(entry.isFullyVerified ? Color.green : Color.orange)
         }.accessibilityElement(children: .combine)
@@ -192,7 +195,8 @@ private struct DestinationRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Label(status.label, systemImage: verificationSymbol)
+                Label("\(status.label) — \(status.isVerified ? "Verified" : "Not fully verified")",
+                      systemImage: verificationSymbol)
                     .font(.headline)
                     .foregroundStyle(status.isVerified ? Color.green : Color.orange)
                 Text(status.recordedVolume.displayName).foregroundStyle(.secondary)
@@ -202,7 +206,12 @@ private struct DestinationRow: View {
                     .foregroundStyle(status.availability.isReadable ? .primary : .secondary)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(status.label) on \(status.recordedVolume.displayName), \(status.availability.title)")
+            // Verification and availability are two facts, spoken as two facts.
+            .accessibilityLabel("""
+                \(status.label) on \(status.recordedVolume.displayName). \
+                \(status.isVerified ? "Verified" : "Not fully verified"). \
+                \(status.availability.title).
+                """)
 
             Text(status.verificationSummary).font(.callout)
             if !status.availability.isReadable {

@@ -52,6 +52,13 @@ struct TransferView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 statusHeader
+                // The result of a finished transfer comes first. It used to sit
+                // under the scan and preflight cards, which put the one thing the
+                // user is waiting for below the fold in a standard window.
+                if let outcome = model.outcome {
+                    if outcome.requiresConflictResolution { ConflictsView(conflicts: outcome.conflicts) }
+                    OutcomeView(outcome: outcome)
+                }
                 HStack(alignment: .top, spacing: 18) {
                     SourceCard(model: model)
                     ConfigurationCard(model: model)
@@ -59,35 +66,54 @@ struct TransferView: View {
                 }
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
-                if model.outcome == nil { startTransferButton }
-                if let copy = model.copyProgress { PhaseProgress(progress: copy) }
-                if let verification = model.verificationProgress { PhaseProgress(progress: verification) }
+                // Offering to start a transfer while one is running invites the
+                // click it then refuses.
+                if model.outcome == nil && !model.isWorking {
+                    startTransferButton
+                    if let reason = startUnavailableReason {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .accessibilityHidden(true) // Already the button's hint.
+                    }
+                }
+                if let copy = model.copyProgress {
+                    PhaseProgress(progress: copy, isTransferFinished: model.outcome != nil)
+                }
+                if let verification = model.verificationProgress {
+                    PhaseProgress(progress: verification, isTransferFinished: model.outcome != nil)
+                }
                 if model.isFinalizing && model.outcome == nil {
                     Label("Finalizing verified transfer…", systemImage: "hourglass").font(.callout)
                 }
-                if let outcome = model.outcome, outcome.requiresConflictResolution {
-                    ConflictsView(conflicts: outcome.conflicts)
-                }
-                if let outcome = model.outcome { OutcomeView(outcome: outcome) }
             }.padding(24)
         }
         .navigationTitle("CardVault")
     }
 
+    /// Symbol, words and colour all carry the status independently, and the
+    /// header is a single VoiceOver element that reads as one sentence.
     private var statusHeader: some View {
-        HStack(spacing: 12) {
-            Image(systemName: model.outcome?.safeToEject == true ? "checkmark.shield.fill" : "shield.lefthalf.filled")
-                .font(.title).foregroundStyle(model.outcome?.safeToEject == true ? Color.green : Color.accentColor)
-            VStack(alignment: .leading) {
+        let presentation = model.statusPresentation
+        return HStack(spacing: 12) {
+            Image(systemName: presentation.symbolName)
+                .font(.title)
+                .foregroundStyle(presentation.tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.message).font(.title2.weight(.semibold))
-                Text(model.outcome?.safeToEject == true ? "Safe to eject does not mean safe to erase." : "CardVault reads the source and never changes it.")
-                    .foregroundStyle(.secondary)
-            }.accessibilityElement(children: .combine)
+                Text(presentation.detail).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(model.message). \(presentation.detail)")
             Spacer()
             if model.outcome?.safeToEject == true {
                 Button("Eject Card", systemImage: "eject.fill") { model.ejectSource() }
+                    .keyboardShortcut("e", modifiers: .command)
+                    .help("Eject the source card (Command-E). Ejecting never erases anything.")
             }
         }
+        .accessibilitySortPriority(100)
+        .announcesStatus(presentation)
     }
 
     private var startTransferButton: some View {
@@ -101,28 +127,62 @@ struct TransferView: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(model.preflight?.canProceed != true || model.isWorking)
-        .help("Start Transfer (Command-Return)")
-        .accessibilityHint("Copies and verifies the selected files at each destination.")
+        .disabled(!canStart)
+        .help(startUnavailableReason ?? "Start Transfer (Command-Return)")
+        .accessibilityHint(startUnavailableReason ?? "Copies and verifies the selected files at each destination.")
+    }
+
+    private var canStart: Bool { model.preflight?.canProceed == true && !model.isWorking }
+
+    /// A greyed-out button explains nothing, and this is the button the whole
+    /// screen exists for, so the reason is written out under it as well.
+    private var startUnavailableReason: String? {
+        if model.isWorking { return "CardVault is busy. Wait for the current operation to finish." }
+        if model.sourceVolume == nil { return "Choose a source before starting a transfer." }
+        if model.scanResult == nil { return "The source has not been scanned yet." }
+        if model.scanResult?.files.isEmpty == true { return "The source holds no transferable files." }
+        if model.destinationURL == nil { return "Choose a primary destination before starting a transfer." }
+        if model.transferName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Give the transfer a name before starting it."
+        }
+        if model.preflight?.canProceed != true { return "Preflight found a blocking problem. Resolve it to continue." }
+        return nil
     }
 }
 
 private struct SourceCard: View {
     @Bindable var model: AppModel
+    /// A spinner is pure motion carrying one bit of information. Under reduced
+    /// motion that bit is stated in words instead.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         GroupBox("Source") {
             VStack(alignment: .leading, spacing: 12) {
                 Label(model.sourceVolume?.displayName ?? "No source selected", systemImage: "sdcard")
-                if let source = model.sourceVolume { Text(source.fileSystem).font(.caption).foregroundStyle(.secondary) }
+                    .accessibilityLabel(model.sourceVolume.map { "Source: \($0.displayName), \($0.fileSystem)" }
+                                        ?? "Source: none selected")
+                if let source = model.sourceVolume {
+                    Text(source.fileSystem).font(.caption).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
                 Button("Choose Source…") { model.chooseSource() }
+                    .keyboardShortcut("o", modifiers: .command)
                 if !model.detectedVolumes.isEmpty {
                     Menu("Detected Volumes") {
                         ForEach(model.detectedVolumes) { volume in
                             Button(volume.identity.displayName) { model.selectDetectedVolume(volume) }
                         }
                     }
+                    .accessibilityHint("Removable volumes CardVault can see. Choosing one asks macOS for permission to read it.")
                 }
-                if model.isWorking && model.scanResult == nil { ProgressView().controlSize(.small) }
+                if model.isWorking && model.scanResult == nil {
+                    if reduceMotion {
+                        Text("Scanning…").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView().controlSize(.small).accessibilityLabel("Scanning the source")
+                    }
+                }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity)
     }
@@ -150,12 +210,20 @@ private struct DestinationsCard: View {
         GroupBox("Destinations") {
             VStack(alignment: .leading, spacing: 10) {
                 Label(model.destinationURL?.lastPathComponent ?? "Choose primary", systemImage: "externaldrive")
+                    .accessibilityLabel("Primary destination: \(model.destinationURL?.lastPathComponent ?? "none chosen")")
                 Button("Choose Primary…") { model.choosePrimary() }
+                    .keyboardShortcut("d", modifiers: .command)
                 Divider()
                 Label(model.backupURL?.lastPathComponent ?? "No backup selected", systemImage: "externaldrive.badge.plus")
+                    .accessibilityLabel("Backup destination: \(model.backupURL?.lastPathComponent ?? "none chosen")")
                 HStack {
                     Button("Choose Backup…") { model.chooseBackup() }
-                    if model.backupURL != nil { Button("Remove") { model.removeBackup() } }
+                        .keyboardShortcut("d", modifiers: [.command, .shift])
+                    if model.backupURL != nil {
+                        Button("Remove") { model.removeBackup() }
+                            .accessibilityLabel("Remove the backup destination")
+                            .help("Stops writing a second copy. Nothing already written is removed.")
+                    }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity)
@@ -183,8 +251,16 @@ private struct PreflightSummary: View {
             VStack(alignment: .leading, spacing: 8) {
                 if result.issues.isEmpty { Label("Ready to transfer", systemImage: "checkmark.circle") }
                 ForEach(result.issues) { issue in
-                    Label(issue.message, systemImage: issue.severity == .blocking ? "exclamationmark.octagon" : "exclamationmark.triangle")
-                        .foregroundStyle(issue.severity == .blocking ? .red : .orange)
+                    // Severity is written out. A red symbol and an orange symbol
+                    // are the same symbol to anyone who cannot tell the two hues
+                    // apart, and severity decides whether the transfer can start.
+                    Label {
+                        Text("\(Text(severityWord(issue.severity)).fontWeight(.semibold)): \(issue.message)")
+                    } icon: {
+                        Image(systemName: issue.severity == .blocking ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    }
+                    .foregroundStyle(issue.severity == .blocking ? .red : .orange)
+                    .accessibilityLabel("\(severityWord(issue.severity)). \(issue.message)")
                 }
                 ForEach(result.destinations) { destination in
                     Text(destinationDescription(destination))
@@ -192,6 +268,10 @@ private struct PreflightSummary: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func severityWord(_ severity: PreflightSeverity) -> String {
+        severity == .blocking ? "Blocking" : "Warning"
     }
 
     private func destinationDescription(_ destination: DestinationPreflight) -> String {
@@ -205,11 +285,20 @@ private struct PreflightSummary: View {
 
 private struct PhaseProgress: View {
     let progress: TransferProgress
+    /// A finished transfer has its own result. Without this the copy card kept
+    /// saying verification was still in progress after it had finished.
+    let isTransferFinished: Bool
+    /// A bar that slides on every throttled snapshot is motion. The numbers are
+    /// the information; the sliding is not, so it goes first.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GroupBox(title) {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView(value: progress.fractionCompleted)
+                    .animation(reduceMotion ? nil : .default, value: progress.fractionCompleted)
+                    .accessibilityLabel("\(title) progress")
+                    .accessibilityValue(accessibilityValue)
                 HStack {
                     Text("\(progress.completedFiles) of \(progress.totalFiles) files")
                     Spacer()
@@ -220,14 +309,21 @@ private struct PhaseProgress: View {
                     Text(estimates).font(.caption).foregroundStyle(.secondary)
                         .accessibilityLabel("Estimated performance: \(estimates)")
                 }
-                if progress.phase == .copying && progress.isPhaseComplete {
+                if progress.phase == .copying && progress.isPhaseComplete && !isTransferFinished {
                     // Never present a finished copy as a finished transfer.
                     Label("Copy complete — verification still in progress",
                           systemImage: "exclamationmark.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-        }.accessibilityValue("\(progress.completedFiles) of \(progress.totalFiles) files")
+        }.accessibilityValue(accessibilityValue)
+    }
+
+    /// Percentage and file counts together: a percentage alone does not say how
+    /// much of the card is still only on the card.
+    private var accessibilityValue: String {
+        let percent = Int((progress.fractionCompleted * 100).rounded())
+        return "\(percent) percent, \(progress.completedFiles) of \(progress.totalFiles) files"
     }
 
     private var title: String {
@@ -272,11 +368,10 @@ private struct ConflictsView: View {
     }
 
     var body: some View {
-        GroupBox("Paused — \(conflicts.count) file\(conflicts.count == 1 ? "" : "s") need a decision") {
+        // The status header already names the pause and the promise that came
+        // with it; repeating both here only pushed the file list down.
+        GroupBox("Files awaiting your decision") {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Nothing was overwritten and nothing was renamed. The source was not changed.",
-                      systemImage: "hand.raised.fill")
-                    .font(.callout.weight(.medium))
                 ForEach(grouped, id: \.label) { group in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(group.label).font(.headline)
@@ -314,11 +409,24 @@ private struct OutcomeView: View {
     var body: some View {
         GroupBox("Result") {
             VStack(alignment: .leading, spacing: 8) {
+                // Per-destination, in words and with counts: one verified
+                // destination never speaks for another that is not.
                 ForEach(outcome.destinations) { destination in
-                    Label(destination.isVerified ? "\(destination.label) verified" : "\(destination.label) incomplete",
-                          systemImage: destination.isVerified ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    Label(summary(for: destination),
+                          systemImage: destination.isVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(destination.isVerified ? Color.green : Color.orange)
+                        .accessibilityLabel(summary(for: destination))
                 }
-                if outcome.safeToEject { Label("Safe to eject", systemImage: "eject.fill").font(.headline) }
+                if outcome.safeToEject {
+                    Label("Safe to eject", systemImage: "eject.fill").font(.headline)
+                    // Ejecting is safe; finishing what is unverified is not
+                    // possible without the card, and the user is owed that
+                    // before they pull it.
+                    if outcome.destinations.contains(where: { !$0.isVerified }) {
+                        Text("Completing the unverified destination later needs this card again.")
+                            .font(.callout)
+                    }
+                }
                 HStack {
                     ForEach(outcome.destinations) { destination in
                         if let url = destination.finalURL {
@@ -329,5 +437,16 @@ private struct OutcomeView: View {
                 Text("CardVault never declares a card safe to erase.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Counts, never a fraction: a paused transfer has files that are neither
+    /// verified nor failed, so "7 of 7" would be a lie the moment one is waiting
+    /// on a decision.
+    private func summary(for destination: DestinationOutcome) -> String {
+        let verified = destination.verifiedFiles
+        if destination.isVerified {
+            return "\(destination.label) verified — \(verified) file\(verified == 1 ? "" : "s")"
+        }
+        return "\(destination.label) incomplete — \(verified) verified, \(destination.failedFiles) not verified"
     }
 }
