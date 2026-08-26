@@ -7,26 +7,18 @@ public struct MountedVolume: Sendable, Identifiable {
 }
 
 public actor VolumeDiscoveryService {
-    public init() {}
+    private let resolver: VolumeIdentityResolver
+
+    public init(resolver: VolumeIdentityResolver = VolumeIdentityResolver(provider: DiskArbitrationTopologyProvider())) {
+        self.resolver = resolver
+    }
 
     public func mountedVolumes() -> [MountedVolume] {
         let keys: [URLResourceKey] = [.volumeNameKey, .volumeUUIDStringKey, .volumeIsRemovableKey,
-                                      .volumeIsLocalKey, .volumeLocalizedFormatDescriptionKey,
-                                      .fileResourceIdentifierKey, .volumeIsReadOnlyKey]
+                                      .volumeIsLocalKey, .volumeLocalizedFormatDescriptionKey]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: []) ?? []
-        return urls.compactMap { url in
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
-            let identifier = values.fileResourceIdentifier.map { String(describing: $0) }
-            let identity = VolumeIdentity(
-                volumeUUID: values.volumeUUIDString.flatMap(UUID.init(uuidString:)),
-                resourceIdentifier: identifier,
-                displayName: values.volumeName ?? url.lastPathComponent,
-                fileSystem: values.volumeLocalizedFormatDescription ?? "Unknown",
-                isRemovable: values.volumeIsRemovable ?? false,
-                isLocal: values.volumeIsLocal ?? true,
-                physicalStoreIdentifier: values.volumeUUIDString
-            )
-            return MountedVolume(url: url, identity: identity)
+        return urls.map { url in
+            MountedVolume(url: url, identity: resolver.identity(for: url, defaultName: url.lastPathComponent))
         }.sorted { $0.identity.displayName.localizedStandardCompare($1.identity.displayName) == .orderedAscending }
     }
 }

@@ -46,12 +46,7 @@ public struct TransferPreflightService: Sendable {
         if plan.destinations.isEmpty {
             issues.append(.init(code: "destination-missing", severity: .blocking, message: "Choose at least one destination."))
         }
-        if plan.destinations.count == 2,
-           plan.destinations[0].volume.physicalStoreIdentifier != nil,
-           plan.destinations[0].volume.physicalStoreIdentifier == plan.destinations[1].volume.physicalStoreIdentifier {
-            issues.append(.init(code: "same-device", severity: .warning,
-                                message: "Primary and backup are on the same physical device and are not independent copies."))
-        }
+        issues += independenceIssues(destinations: plan.destinations)
         var destinationChecks: [DestinationPreflight] = []
         for (index, destination) in plan.destinations.enumerated() {
             let url = URL(filePath: destination.rootPath).standardizedFileURL
@@ -115,6 +110,27 @@ public struct TransferPreflightService: Sendable {
 
         if let positive = reported.filter({ $0 > 0 }).max() { return positive }
         return reported.contains(0) ? 0 : nil
+    }
+
+    private func independenceIssues(destinations: [DestinationPlan]) -> [PreflightIssue] {
+        var issues: [PreflightIssue] = []
+        for first in destinations.indices {
+            for second in destinations.indices where second > first {
+                let one = destinations[first]
+                let other = destinations[second]
+                switch one.volume.relation(to: other.volume) {
+                case .sameVolume:
+                    issues.append(.init(code: "same-volume", severity: .warning,
+                                        message: "\(one.label) and \(other.label) are on the same volume and are not independent copies."))
+                case .sameDevice:
+                    issues.append(.init(code: "same-device", severity: .warning,
+                                        message: "\(one.label) and \(other.label) are partitions of the same physical device and are not independent copies."))
+                case .distinct, .indeterminate:
+                    break
+                }
+            }
+        }
+        return issues
     }
 
     private func collisionIssues(files: [SourceFile], destinations: [DestinationPlan]) -> [PreflightIssue] {

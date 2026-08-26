@@ -67,12 +67,19 @@ public struct VolumeIdentity: Codable, Hashable, Sendable {
     public var fileSystem: String
     public var isRemovable: Bool
     public var isLocal: Bool
+    /// Whole physical device the volume lives on, e.g. `disk4`. Only comparable across identities
+    /// resolved from Disk Arbitration.
     public var physicalStoreIdentifier: String?
+    /// Partition backing the volume, e.g. `disk4s1`.
+    public var partitionIdentifier: String?
+    public var identitySource: VolumeIdentitySource?
 
     public init(volumeUUID: UUID? = nil, resourceIdentifier: String? = nil,
                 displayName: String, fileSystem: String = "Unknown",
                 isRemovable: Bool = false, isLocal: Bool = true,
-                physicalStoreIdentifier: String? = nil) {
+                physicalStoreIdentifier: String? = nil,
+                partitionIdentifier: String? = nil,
+                identitySource: VolumeIdentitySource? = nil) {
         self.volumeUUID = volumeUUID
         self.resourceIdentifier = resourceIdentifier
         self.displayName = displayName
@@ -80,6 +87,8 @@ public struct VolumeIdentity: Codable, Hashable, Sendable {
         self.isRemovable = isRemovable
         self.isLocal = isLocal
         self.physicalStoreIdentifier = physicalStoreIdentifier
+        self.partitionIdentifier = partitionIdentifier
+        self.identitySource = identitySource
     }
 }
 

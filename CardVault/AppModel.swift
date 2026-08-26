@@ -27,7 +27,9 @@ final class AppModel {
     private let scanner = SourceScanner()
     private let preflightService = TransferPreflightService()
     private let coordinator = TransferCoordinator()
+    private let volumeResolver = VolumeIdentityResolver(provider: DiskArbitrationTopologyProvider())
     private let volumeDiscovery = VolumeDiscoveryService()
+    private let ejectionService: DiskEjectionService = DiskArbitrationEjectionService()
     private let bookmarkStore: SecurityScopedBookmarkStore
     private let historyStore: TransferHistoryStore
     private var sourceAccess: SecurityScopedAccess?
@@ -108,7 +110,7 @@ final class AppModel {
         if sourceURL == nil, let access = try? await bookmarkStore.resolve(key: "last-source") {
             sourceAccess = access
             sourceURL = access.url
-            sourceVolume = Self.volumeIdentity(for: access.url, defaultName: access.url.lastPathComponent, removable: true)
+            sourceVolume = volumeResolver.identity(for: access.url, defaultName: access.url.lastPathComponent, assumeRemovable: true)
             transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
             scan()
         }
@@ -150,10 +152,20 @@ final class AppModel {
 
     func ejectSource() {
         guard outcome?.safeToEject == true, let sourceURL else { return }
-        do {
-            _ = try NSWorkspace.shared.unmountAndEjectDevice(at: sourceURL)
-            message = "Card ejected"
-        } catch { present(error, operation: "Ejecting source") }
+        let name = sourceVolume?.displayName ?? sourceURL.lastPathComponent
+        isWorking = true
+        Task {
+            do {
+                try await ejectionService.eject(volumeAt: sourceURL)
+                message = "\(name) ejected"
+            } catch let error as VolumeEjectionError {
+                errorMessage = [error.errorDescription, error.recoverySuggestion].compactMap { $0 }.joined(separator: " ")
+                message = "\(error.volumeName) is still mounted"
+            } catch {
+                present(error, operation: "Ejecting \(name)")
+            }
+            isWorking = false
+        }
     }
 
     private func recordHistory(from outcome: TransferOutcome?) async {
@@ -178,11 +190,11 @@ final class AppModel {
         guard let sourceURL, let sourceVolume, let scanResult, let destinationURL,
               !transferName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         var destinations = [DestinationPlan(label: "Primary", rootPath: destinationURL.path,
-                                            volume: Self.volumeIdentity(for: destinationURL,
-                                                                        defaultName: destinationURL.lastPathComponent))]
+                                            volume: volumeResolver.identity(for: destinationURL,
+                                                                            defaultName: destinationURL.lastPathComponent))]
         if let backupURL {
             destinations.append(.init(label: "Backup", rootPath: backupURL.path,
-                                      volume: Self.volumeIdentity(for: backupURL, defaultName: backupURL.lastPathComponent)))
+                                      volume: volumeResolver.identity(for: backupURL, defaultName: backupURL.lastPathComponent)))
         }
         return TransferPlan(name: transferName, mode: mode, sourceRootPath: sourceURL.path,
                             sourceVolume: sourceVolume, files: scanResult.files, destinations: destinations)
@@ -192,7 +204,7 @@ final class AppModel {
         sourceAccess = nil
         sourceURL = url
         sourceVolume = knownVolume
-            ?? Self.volumeIdentity(for: url, defaultName: url.lastPathComponent, removable: true)
+            ?? volumeResolver.identity(for: url, defaultName: url.lastPathComponent, assumeRemovable: true)
         Task { try? await bookmarkStore.save(url: url, key: "last-source") }
         transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
         scan()
@@ -215,17 +227,6 @@ final class AppModel {
     private func present(_ error: Error, operation: String) {
         errorMessage = "\(operation) failed: \(error.localizedDescription). The source was not modified. You can inspect the incomplete destination and try again."
         message = "Transfer needs attention"
-    }
-
-    static func volumeIdentity(for url: URL, defaultName: String, removable: Bool = false) -> VolumeIdentity {
-        let values = try? url.resourceValues(forKeys: [.volumeNameKey, .volumeUUIDStringKey,
-                                                       .volumeLocalizedFormatDescriptionKey, .volumeIsLocalKey])
-        return VolumeIdentity(volumeUUID: values?.volumeUUIDString.flatMap(UUID.init(uuidString:)),
-                              resourceIdentifier: values?.volumeUUIDString,
-                              displayName: values?.volumeName ?? defaultName,
-                              fileSystem: values?.volumeLocalizedFormatDescription ?? "Unknown",
-                              isRemovable: removable, isLocal: values?.volumeIsLocal ?? true,
-                              physicalStoreIdentifier: values?.volumeUUIDString)
     }
 
     static func defaultTransferName() -> String {

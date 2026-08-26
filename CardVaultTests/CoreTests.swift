@@ -129,7 +129,11 @@ struct CoreTests {
             try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: primary); try? FileManager.default.removeItem(at: backup) }
             var plan = makePlan(source: root, destinations: [primary, backup], files: [])
-            for index in plan.destinations.indices { plan.destinations[index].volume.physicalStoreIdentifier = "disk1" }
+            for index in plan.destinations.indices {
+                plan.destinations[index].volume.physicalStoreIdentifier = "disk1"
+                plan.destinations[index].volume.partitionIdentifier = "disk1s\(index + 1)"
+                plan.destinations[index].volume.identitySource = .diskArbitration
+            }
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
             #expect(result.issues.contains { $0.code == "same-device" && $0.severity == .warning })
         }
