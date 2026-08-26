@@ -113,14 +113,14 @@ public actor TransferCoordinator {
     }
 
     private func destinationLocations(_ plan: TransferPlan) -> [Location] {
-        let safeName = plan.name.replacingOccurrences(of: "/", with: "-")
+        let layout = TransferLayout(plan: plan)
         return plan.destinations.map { destination in
             let parent = URL(filePath: destination.rootPath, directoryHint: .isDirectory)
-            let staging = parent.appending(path: ".\(safeName).cardvault-incomplete-\(plan.id.uuidString)", directoryHint: .isDirectory)
+            let staging = layout.stagingRoot(in: parent)
             return Location(destination: destination, stagingRoot: staging,
-                            originalsRoot: staging.appending(path: "Originals", directoryHint: .isDirectory),
-                            manifestURL: staging.appending(path: ".cardvault/transfer-manifest.json"),
-                            finalRoot: parent.appending(path: safeName, directoryHint: .isDirectory))
+                            originalsRoot: TransferLayout.originalsRoot(inStaging: staging),
+                            manifestURL: TransferLayout.manifestURL(inStaging: staging),
+                            finalRoot: layout.finalRoot(in: parent))
         }
     }
 
@@ -447,8 +447,8 @@ public actor TransferCoordinator {
         let finalLocations = locations.map { location in
             guard outcomes.first(where: { $0.id == location.destination.id })?.finalURL != nil else { return location }
             return Location(destination: location.destination, stagingRoot: location.finalRoot,
-                            originalsRoot: location.finalRoot.appending(path: "Originals"),
-                            manifestURL: location.finalRoot.appending(path: ".cardvault/transfer-manifest.json"),
+                            originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
+                            manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
                             finalRoot: location.finalRoot)
         }
         try await persist(manifest, locations: finalLocations)

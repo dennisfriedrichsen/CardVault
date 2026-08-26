@@ -29,6 +29,14 @@ final class AppModel {
     var message = "Choose an SD card or source folder to begin."
     var errorMessage: String?
 
+    /// Unfinished transfers found at launch. Presented before anything else,
+    /// because starting a new transfer over an interrupted one is the mistake
+    /// this screen exists to prevent.
+    var recovery: RecoveryScan?
+    var isPresentingRecovery = false
+    var inspection: RecoveryInspection?
+    var pendingAbandon: (transfer: RecoverableTransfer, plan: AbandonPlan)?
+
     private let scanner = SourceScanner()
     private let preflightService = TransferPreflightService()
     private let coordinator = TransferCoordinator()
@@ -37,9 +45,13 @@ final class AppModel {
     private let ejectionService: DiskEjectionService = DiskArbitrationEjectionService()
     private let bookmarkStore: SecurityScopedBookmarkStore
     private let historyStore: TransferHistoryStore
+    private let recoveryCoordinator = RecoveryCoordinator()
     private var sourceAccess: SecurityScopedAccess?
     private var primaryAccess: SecurityScopedAccess?
     private var backupAccess: SecurityScopedAccess?
+    /// Security-scoped access has to outlive the scan that opened it, or the
+    /// URLs stop resolving the moment the last reference goes away.
+    private var recoveryAccesses: [SecurityScopedAccess] = []
 
     init() {
         let supportBase = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -57,12 +69,12 @@ final class AppModel {
 
     func choosePrimary() {
         destinationURL = chooseFolder(prompt: "Choose Primary Destination")
-        if let destinationURL { Task { try? await bookmarkStore.save(url: destinationURL, key: "primary") } }
+        if let destinationURL { Task { try? await bookmarkStore.save(url: destinationURL, key: BookmarkKey.primary) } }
         updatePreflight()
     }
     func chooseBackup() {
         backupURL = chooseFolder(prompt: "Choose Backup Destination")
-        if let backupURL { Task { try? await bookmarkStore.save(url: backupURL, key: "backup") } }
+        if let backupURL { Task { try? await bookmarkStore.save(url: backupURL, key: BookmarkKey.backup) } }
         updatePreflight()
     }
     func removeBackup() { backupURL = nil; updatePreflight() }
@@ -99,6 +111,9 @@ final class AppModel {
         isFinalizing = false
         message = "Copying — do not remove card yet"
         Task {
+            // Recorded before the first byte moves: if this run is interrupted,
+            // relaunch recovery can only find these roots through these keys.
+            await rememberRoots(for: plan)
             do {
                 outcome = try await coordinator.execute(plan: plan) { [weak self] update in
                     await self?.receive(update)
@@ -123,18 +138,19 @@ final class AppModel {
     func refresh() async {
         await refreshDetectedVolumes()
         history = await historyStore.all()
-        if sourceURL == nil, let access = try? await bookmarkStore.resolve(key: "last-source") {
+        await discoverUnfinishedTransfers()
+        if sourceURL == nil, let access = try? await bookmarkStore.resolve(key: BookmarkKey.lastSource) {
             sourceAccess = access
             sourceURL = access.url
             sourceVolume = volumeResolver.identity(for: access.url, defaultName: access.url.lastPathComponent, assumeRemovable: true)
             transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
             scan()
         }
-        if destinationURL == nil, let access = try? await bookmarkStore.resolve(key: "primary") {
+        if destinationURL == nil, let access = try? await bookmarkStore.resolve(key: BookmarkKey.primary) {
             primaryAccess = access
             destinationURL = access.url
         }
-        if backupURL == nil, let access = try? await bookmarkStore.resolve(key: "backup") {
+        if backupURL == nil, let access = try? await bookmarkStore.resolve(key: BookmarkKey.backup) {
             backupAccess = access
             backupURL = access.url
         }
@@ -182,6 +198,125 @@ final class AppModel {
             }
             isWorking = false
         }
+    }
+
+    // MARK: - Relaunch recovery
+
+    /// Rebuilds each interrupted transfer's own roots from its own bookmarks.
+    /// The last-used destinations are searched too, so a transfer whose
+    /// per-transfer keys predate this version is still found.
+    func discoverUnfinishedTransfers() async {
+        var accesses: [SecurityScopedAccess] = []
+        var roots: [URL] = []
+        var sources: [UUID: SecurityScopedAccess] = [:]
+        var destinations: [UUID: [UUID: SecurityScopedAccess]] = [:]
+
+        for key in await bookmarkStore.keys(withPrefix: BookmarkKey.transferPrefix) {
+            guard let transferID = BookmarkKey.transferID(fromKey: key),
+                  let access = try? await bookmarkStore.resolve(key: key) else { continue }
+            accesses.append(access)
+            if key.hasSuffix("/source") {
+                sources[transferID] = access
+            } else if let last = key.split(separator: "/").last,
+                      let destinationID = UUID(uuidString: String(last)) {
+                destinations[transferID, default: [:]][destinationID] = access
+                roots.append(access.url)
+            }
+        }
+        for key in [BookmarkKey.primary, BookmarkKey.backup] {
+            guard let access = try? await bookmarkStore.resolve(key: key) else { continue }
+            accesses.append(access)
+            roots.append(access.url)
+        }
+        recoveryAccesses = accesses
+        let scan = await recoveryCoordinator.scan(destinationRoots: roots, sourceRoots: sources,
+                                                  transferDestinationRoots: destinations)
+        recovery = scan
+        if !scan.isEmpty { isPresentingRecovery = true }
+    }
+
+    func resume(_ transfer: RecoverableTransfer) {
+        isWorking = true
+        outcome = nil
+        copyProgress = nil
+        verificationProgress = nil
+        isFinalizing = false
+        isPresentingRecovery = false
+        section = .transfer
+        message = "Resuming \(transfer.name) — do not remove card yet"
+        Task {
+            do {
+                let plan = try await recoveryCoordinator.resumePlan(for: transfer)
+                let manifestURL = try await recoveryCoordinator.resumeManifestURL(for: transfer)
+                // Resumes at a whole-file boundary from the durable manifest;
+                // files already verified are confirmed, not copied again.
+                outcome = try await coordinator.resume(plan: plan, manifestURL: manifestURL) { [weak self] update in
+                    await self?.receive(update)
+                }
+                isFinalizing = false
+                if outcome?.requiresConflictResolution == true {
+                    let count = outcome?.conflicts.count ?? 0
+                    message = "Paused — \(count) file\(count == 1 ? "" : "s") need a decision"
+                } else {
+                    message = outcome?.state == .verified
+                        ? "Transfer fully verified — Safe to eject"
+                        : "Transfer needs attention — Safe to eject"
+                    await recordHistory(from: outcome)
+                    await forgetRoots(transferID: transfer.id)
+                }
+            } catch is CancellationError {
+                message = "Resume interrupted — Safe to eject"
+            } catch { present(error, operation: "Resuming \(transfer.name)") }
+            await discoverUnfinishedTransfers()
+            isWorking = false
+        }
+    }
+
+    func inspect(_ transfer: RecoverableTransfer) {
+        // Pure and read-only, so it needs no actor hop and no task.
+        inspection = recoveryCoordinator.inspect(transfer)
+    }
+
+    func revealManifest(for transfer: RecoverableTransfer) {
+        guard let url = transfer.destinations.compactMap(\.manifestURL)
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            errorMessage = "The transfer manifest is unavailable. Reconnect one of the transfer destinations and try again."
+            return
+        }
+        reveal(url)
+    }
+
+    /// Asks before removing anything, and shows exactly what would go.
+    func confirmAbandon(_ transfer: RecoverableTransfer) {
+        pendingAbandon = (transfer, recoveryCoordinator.abandonPlan(for: transfer))
+    }
+
+    func abandon(_ transfer: RecoverableTransfer, removingIncompleteArtifacts: Bool) {
+        pendingAbandon = nil
+        Task {
+            let result = await recoveryCoordinator.abandon(
+                transfer, removingIncompleteArtifacts: removingIncompleteArtifacts)
+            if !result.failures.isEmpty {
+                errorMessage = "Some artifacts could not be removed: \(result.failures.joined(separator: ", "))"
+            }
+            await forgetRoots(transferID: transfer.id)
+            await discoverUnfinishedTransfers()
+        }
+    }
+
+    private func rememberRoots(for plan: TransferPlan) async {
+        if let sourceURL {
+            try? await bookmarkStore.save(url: sourceURL, key: BookmarkKey.source(transferID: plan.id))
+        }
+        for destination in plan.destinations {
+            try? await bookmarkStore.save(
+                url: URL(filePath: destination.rootPath, directoryHint: .isDirectory),
+                key: BookmarkKey.destination(transferID: plan.id, destinationID: destination.id))
+        }
+    }
+
+    private func forgetRoots(transferID: UUID) async {
+        try? await bookmarkStore.removeAll(withPrefix: "\(BookmarkKey.transferPrefix)\(transferID.uuidString)/")
     }
 
     private func recordHistory(from outcome: TransferOutcome?) async {
@@ -235,7 +370,7 @@ final class AppModel {
         sourceURL = url
         sourceVolume = knownVolume
             ?? volumeResolver.identity(for: url, defaultName: url.lastPathComponent, assumeRemovable: true)
-        Task { try? await bookmarkStore.save(url: url, key: "last-source") }
+        Task { try? await bookmarkStore.save(url: url, key: BookmarkKey.lastSource) }
         transferName = transferName.isEmpty ? Self.defaultTransferName() : transferName
         scan()
     }

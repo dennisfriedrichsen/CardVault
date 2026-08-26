@@ -23,6 +23,10 @@ public struct TransferManifest: Codable, Sendable {
     public var startedAt: Date?
     public var completedAt: Date?
     public var verifiedAt: Date?
+    /// Set when the user explicitly abandoned the transfer. The record and every
+    /// verified file it describes stay on disk; this only stops recovery from
+    /// offering the transfer again. Additive, so `schemaVersion` stays 1.
+    public var abandonedAt: Date?
     public var state: TransferState
     public var mode: TransferMode
     public var source: VolumeIdentity
@@ -37,6 +41,7 @@ public struct TransferManifest: Codable, Sendable {
         transferID = plan.id
         transferName = plan.name
         createdAt = now
+        abandonedAt = nil
         state = .awaitingConfirmation
         mode = plan.mode
         source = plan.sourceVolume
