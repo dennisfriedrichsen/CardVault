@@ -14,6 +14,20 @@ public struct TransferOutcome: Sendable {
     public let state: TransferState
     public let destinations: [DestinationOutcome]
     public let safeToEject: Bool
+    /// Destination content CardVault refused to overwrite. Non-empty means the
+    /// transfer paused before verification and is waiting on a decision.
+    public let conflicts: [DestinationConflict]
+
+    public init(transferID: UUID, state: TransferState, destinations: [DestinationOutcome],
+                safeToEject: Bool, conflicts: [DestinationConflict] = []) {
+        self.transferID = transferID
+        self.state = state
+        self.destinations = destinations
+        self.safeToEject = safeToEject
+        self.conflicts = conflicts
+    }
+
+    public var requiresConflictResolution: Bool { !conflicts.isEmpty }
 }
 
 public actor TransferCoordinator {
@@ -21,6 +35,7 @@ public actor TransferCoordinator {
     private let fileSystem: LocalFileSystem
     private let manifestStore: ManifestStore
     private let tuning: TransferTuning
+    private let classifier: ConflictClassifier
     private let now: @Sendable () -> Date
 
     /// Precise counters live here, on the coordinator. Only throttled snapshots
@@ -30,10 +45,12 @@ public actor TransferCoordinator {
 
     public init(fileSystem: LocalFileSystem = LocalFileSystem(), manifestStore: ManifestStore = ManifestStore(),
                 tuning: TransferTuning = .default,
+                classifier: ConflictClassifier = ConflictClassifier(),
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.fileSystem = fileSystem
         self.manifestStore = manifestStore
         self.tuning = tuning
+        self.classifier = classifier
         self.now = now
     }
 
@@ -62,7 +79,12 @@ public actor TransferCoordinator {
         try await persist(manifest, locations: locations)
 
         do {
-            try await copy(plan: plan, manifest: &manifest, locations: locations)
+            let conflicts = try await copy(plan: plan, manifest: &manifest, locations: locations)
+            // A conflict is a question for the user, not a failure to push past.
+            // Verification and finalisation both wait until it is answered.
+            if !conflicts.isEmpty {
+                return try await pause(manifest: &manifest, locations: locations, conflicts: conflicts)
+            }
             manifest.state = .copyComplete
             try await persist(manifest, locations: locations)
             manifest.state = .verifying
@@ -163,11 +185,20 @@ public actor TransferCoordinator {
 
     // MARK: - Copy
 
-    private func copy(plan: TransferPlan, manifest: inout TransferManifest, locations: [Location]) async throws {
+    private func copy(plan: TransferPlan, manifest: inout TransferManifest,
+                      locations: [Location]) async throws -> [DestinationConflict] {
         // One source hash pass plus one write pass per destination.
         beginPhase(.copying, totalFiles: manifest.files.count,
                    totalBytes: workBytes(plan, passes: 1 + locations.count))
         let onBytes = byteHandler
+        var indexes: [UUID: CompatibleManifestIndex] = [:]
+        for location in locations {
+            indexes[location.destination.id] = await CompatibleManifestIndex.load(
+                searchRoots: [location.stagingRoot,
+                              URL(filePath: location.destination.rootPath, directoryHint: .isDirectory)],
+                excluding: manifest.transferID, store: manifestStore)
+        }
+        var conflicts: [DestinationConflict] = []
         for index in manifest.files.indices {
             try Task.checkCancellation()
             let file = manifest.files[index]
@@ -188,11 +219,45 @@ public actor TransferCoordinator {
                 }
                 let destination = location.originalsRoot.appending(path: file.relativeDestinationPath)
                 if await fileSystem.exists(destination) {
-                    if result?.copyState == .copied { await recordBytes(file.byteCount); continue }
-                    if result?.copyState == .copying || result?.copyState == .failed {
+                    let evidence = ConflictEvidence(
+                        relativePath: file.relativeDestinationPath,
+                        expectedByteCount: file.byteCount,
+                        sourceChecksum: manifest.files[index].sourceChecksum,
+                        currentResult: result,
+                        compatibleRecord: indexes[location.destination.id]?[file.relativeDestinationPath])
+                    let assessment = await classifier.assess(existingFileAt: destination, evidence: evidence,
+                                                             fileSystem: fileSystem)
+                    manifest.files[index].destinations[location.destination.id]?.conflict = assessment.classification
+                    if assessment.classification.isSatisfied {
+                        // Skipped only because the bytes on disk were hashed and
+                        // matched the source. A matching name and size alone
+                        // never reaches this branch.
+                        manifest.files[index].destinations[location.destination.id]?.copyState = .skipped
+                        manifest.files[index].destinations[location.destination.id]?.destinationChecksum =
+                            assessment.existingChecksum
+                        manifest.files[index].destinations[location.destination.id]?.verification = .verified
+                        manifest.files[index].destinations[location.destination.id]?.error = nil
+                        try await persist(manifest, locations: locations)
+                        await recordBytes(file.byteCount)
+                        continue
+                    }
+                    if assessment.classification.isReplaceable {
                         try await fileSystem.removeIncompleteFile(destination)
                     } else {
-                        throw FileSystemError.existingConflict(file.relativeDestinationPath)
+                        // Never overwritten, never renamed around.
+                        manifest.files[index].destinations[location.destination.id]?.copyState = .conflicted
+                        manifest.files[index].destinations[location.destination.id]?.verification = .pending
+                        manifest.files[index].destinations[location.destination.id]?.error = assessment.explanation
+                        conflicts.append(DestinationConflict(
+                            destinationID: location.destination.id,
+                            destinationLabel: location.destination.label,
+                            relativePath: file.relativeDestinationPath,
+                            classification: assessment.classification,
+                            existingByteCount: assessment.existingByteCount,
+                            explanation: assessment.explanation))
+                        try await persist(manifest, locations: locations)
+                        await recordBytes(file.byteCount)
+                        continue
                     }
                 }
                 manifest.files[index].destinations[location.destination.id]?.copyState = .copying
@@ -213,6 +278,28 @@ public actor TransferCoordinator {
         }
         // A complete copy phase is not a successful transfer; verification follows.
         await flushPhase(currentRelativePath: .some(nil))
+        return conflicts
+    }
+
+    /// Stops before verification with everything already written left intact and
+    /// durably recorded, so the user can resolve each conflict and resume.
+    private func pause(manifest: inout TransferManifest, locations: [Location],
+                       conflicts: [DestinationConflict]) async throws -> TransferOutcome {
+        manifest.state = .needsAttention
+        for conflict in conflicts {
+            manifest.warnings.append("\(conflict.destinationLabel): \(conflict.relativePath) — \(conflict.explanation)")
+        }
+        try await persist(manifest, locations: locations)
+        let outcomes = locations.map { location -> DestinationOutcome in
+            let values = manifest.files.compactMap { $0.destinations[location.destination.id] }
+            return DestinationOutcome(id: location.destination.id, label: location.destination.label,
+                                      verifiedFiles: values.count { $0.verification == .verified },
+                                      failedFiles: values.count { $0.verification != .verified },
+                                      finalURL: nil)
+        }
+        // Resuming needs the card again, so this is not the moment to eject it.
+        return TransferOutcome(transferID: manifest.transferID, state: .needsAttention,
+                               destinations: outcomes, safeToEject: false, conflicts: conflicts)
     }
 
     // MARK: - Verify

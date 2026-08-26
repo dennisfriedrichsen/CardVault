@@ -62,6 +62,9 @@ struct TransferView: View {
                 if model.isFinalizing && model.outcome == nil {
                     Label("Finalizing verified transfer…", systemImage: "hourglass").font(.callout)
                 }
+                if let outcome = model.outcome, outcome.requiresConflictResolution {
+                    ConflictsView(conflicts: outcome.conflicts)
+                }
                 if let outcome = model.outcome { OutcomeView(outcome: outcome) }
             }.padding(24)
         }
@@ -250,6 +253,56 @@ private struct PhaseProgress: View {
         let formatted = Duration.seconds(Int(clamped.rounded()))
             .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated))
         return "\(formatted) remaining"
+    }
+}
+
+/// The conflict presentation flow: CardVault has stopped and is asking. Nothing
+/// here offers to overwrite or to write under a different name, because neither
+/// is a decision the app is entitled to make on the user's behalf.
+private struct ConflictsView: View {
+    let conflicts: [DestinationConflict]
+
+    private var grouped: [(label: String, items: [DestinationConflict])] {
+        Dictionary(grouping: conflicts, by: \.destinationLabel)
+            .map { (label: $0.key, items: $0.value.sorted { $0.relativePath < $1.relativePath }) }
+            .sorted { $0.label < $1.label }
+    }
+
+    var body: some View {
+        GroupBox("Paused — \(conflicts.count) file\(conflicts.count == 1 ? "" : "s") need a decision") {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Nothing was overwritten and nothing was renamed. The source was not changed.",
+                      systemImage: "hand.raised.fill")
+                    .font(.callout.weight(.medium))
+                ForEach(grouped, id: \.label) { group in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(group.label).font(.headline)
+                        ForEach(group.items) { conflict in
+                            VStack(alignment: .leading, spacing: 2) {
+                                // Symbol and wording carry the status; colour alone never does.
+                                Label(conflict.relativePath, systemImage: symbol(for: conflict.classification))
+                                    .font(.body.monospaced())
+                                Text(conflict.classification.title).font(.caption.weight(.semibold))
+                                Text(conflict.explanation).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(conflict.relativePath), \(conflict.classification.title)")
+                            .accessibilityValue(conflict.explanation)
+                        }
+                    }
+                }
+                Text("Resolve each file on the destination, then start the transfer again to continue where it stopped.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func symbol(for classification: ConflictClassification) -> String {
+        switch classification {
+        case .differentContent: "doc.on.doc.fill"
+        case .unrelatedFile: "questionmark.folder.fill"
+        default: "exclamationmark.triangle.fill"
+        }
     }
 }
 

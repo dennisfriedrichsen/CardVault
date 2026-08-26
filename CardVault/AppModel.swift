@@ -104,8 +104,15 @@ final class AppModel {
                     await self?.receive(update)
                 }
                 isFinalizing = false
-                message = outcome?.state == .verified ? "Transfer fully verified — Safe to eject" : "Transfer needs attention — Safe to eject"
-                await recordHistory(from: outcome)
+                if outcome?.requiresConflictResolution == true {
+                    // Paused, not finished: the card stays mounted because
+                    // resuming reads from it again.
+                    let count = outcome?.conflicts.count ?? 0
+                    message = "Paused — \(count) file\(count == 1 ? "" : "s") need a decision"
+                } else {
+                    message = outcome?.state == .verified ? "Transfer fully verified — Safe to eject" : "Transfer needs attention — Safe to eject"
+                    await recordHistory(from: outcome)
+                }
             } catch is CancellationError {
                 message = "Transfer interrupted — Safe to eject"
             } catch { present(error, operation: "Transfer") }
