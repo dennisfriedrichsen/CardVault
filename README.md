@@ -83,6 +83,11 @@ swift test --disable-sandbox
 See the [manual removable-media procedure](Docs/manual-removable-media-test.md) for opt-in testing with
 a real card, APFS/HFS+/exFAT destinations, disconnections, sleep, exhausted space, and safe ejection.
 
+Short reads and writes, disconnections, exhausted space, permission and bookmark failures, checksum
+corruption, source mutation, sleep/wake, cancellation, termination between manifest updates, and
+failures on either side of finalization are all reproduced deterministically in temporary
+directories. See [fault injection and interruption coverage](Docs/fault-injection-coverage.md).
+
 Progress throttling, transfer-rate and remaining-time estimates, and the internal tuning knobs behind
 them are described in [progress and performance](Docs/progress-performance.md), along with the
 benchmark used to choose their thresholds.

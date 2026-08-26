@@ -70,10 +70,21 @@ public enum ManifestError: Error, Equatable, Sendable {
 }
 
 public actor ManifestStore {
-    private let fileManager: FileManager
-    public init(fileManager: FileManager = .default) { self.fileManager = fileManager }
+    /// Consulted before every save. Returning an error keeps the record off the
+    /// disk, which is how a disconnected drive — or a process that dies between
+    /// two manifest updates — looks to everything above this store.
+    public typealias SaveInterceptor = @Sendable (TransferManifest, URL) async -> Error?
 
-    public func save(_ manifest: TransferManifest, to url: URL) throws {
+    private let fileManager: FileManager
+    private let interceptor: SaveInterceptor?
+
+    public init(fileManager: FileManager = .default, beforeSave: SaveInterceptor? = nil) {
+        self.fileManager = fileManager
+        interceptor = beforeSave
+    }
+
+    public func save(_ manifest: TransferManifest, to url: URL) async throws {
+        if let error = await interceptor?(manifest, url) { throw error }
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
