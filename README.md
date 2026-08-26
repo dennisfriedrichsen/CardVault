@@ -85,8 +85,9 @@ a real card, APFS/HFS+/exFAT destinations, disconnections, sleep, exhausted spac
 
 ## Current limitations
 
-V1 resumes at whole-file boundaries, not partial-file offsets. Disk identity is based on public URL
-volume metadata; a dedicated Disk Arbitration adapter can improve whole-device topology on complex disk
-layouts. Automatic performance profiling and destructive real-media fault tests remain manual. Cloud,
+V1 resumes at whole-file boundaries, not partial-file offsets. Disk identity comes from a Disk
+Arbitration adapter behind a mockable service boundary; public URL volume metadata is the documented
+fallback when Disk Arbitration cannot describe a path, and identities resolved that way cannot claim
+two paths share a physical device. Automatic performance profiling and destructive real-media fault tests remain manual. Cloud,
 catalog import, source deletion, formatting, privileged helpers, and proprietary libraries are outside
 the product boundary.
