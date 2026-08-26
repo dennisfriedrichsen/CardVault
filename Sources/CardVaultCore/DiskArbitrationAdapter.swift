@@ -13,9 +13,14 @@ public struct DiskArbitrationTopologyProvider: VolumeTopologyProvider {
               let bsdName = DADiskGetBSDName(disk).flatMap({ String(validatingCString: $0) }), !bsdName.isEmpty
         else { throw VolumeTopologyError.notFound(path: url.path) }
 
-        let wholeName = DADiskCopyWholeDisk(disk)
+        // DADiskGetBSDName returns a pointer owned by the disk it is asked about, so the whole
+        // disk has to outlive the read. Chaining off the DADiskCopyWholeDisk temporary lets ARC
+        // release it first, and the name is then read from freed memory.
+        let wholeDisk = DADiskCopyWholeDisk(disk)
+        let wholeName = wholeDisk
             .flatMap { DADiskGetBSDName($0) }
             .flatMap { String(validatingCString: $0) }
+        withExtendedLifetime(wholeDisk) {}
 
         return VolumeTopologyNode(
             partitionIdentifier: bsdName,

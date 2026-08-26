@@ -147,6 +147,34 @@ struct VolumeTopologyTests {
     }
 }
 
+/// The whole-disk BSD name is read through a pointer owned by the disk object it describes.
+/// Releasing that object before the read yields freed memory, so these run against the boot
+/// volume — every Mac has one on a real device — rather than waiting for opt-in removable media.
+@Suite("Disk Arbitration whole-disk identity")
+struct DiskArbitrationWholeDiskTests {
+    private let bootVolume = URL(filePath: "/")
+
+    @Test("Whole-disk identity is a device identifier, not a slice or freed memory")
+    func resolvesWholeDevice() throws {
+        let node = try DiskArbitrationTopologyProvider().topology(forVolumeAt: bootVolume)
+        #expect(node.wholeDeviceIdentifier.wholeMatch(of: /disk[0-9]+/) != nil)
+        #expect(node.partitionIdentifier.hasPrefix(node.wholeDeviceIdentifier))
+        // `?? bsdName` makes a failed read look plausible: a slice identifier passes every
+        // prefix check against itself. Only a strict prefix proves the whole disk was read.
+        #expect(node.wholeDeviceIdentifier != node.partitionIdentifier)
+    }
+
+    @Test("Whole-disk identity does not vary between resolutions")
+    func wholeDeviceIdentifierIsStable() throws {
+        let provider = DiskArbitrationTopologyProvider()
+        let identifiers = try (0..<8).map { _ in
+            try provider.topology(forVolumeAt: bootVolume).wholeDeviceIdentifier
+        }
+        // Freed bytes differ run to run; a device identifier does not.
+        #expect(Set(identifiers).count == 1)
+    }
+}
+
 /// Opt-in coverage for real hardware. Set `CARDVAULT_DEVICE_VOLUME` to a mounted removable
 /// volume path, e.g. `CARDVAULT_DEVICE_VOLUME=/Volumes/CARD swift test`.
 @Suite("Disk Arbitration on real media", .enabled(if: ProcessInfo.processInfo.environment["CARDVAULT_DEVICE_VOLUME"] != nil))
@@ -159,8 +187,11 @@ struct DiskArbitrationManualTests {
     func describesVolume() throws {
         let node = try DiskArbitrationTopologyProvider().topology(forVolumeAt: volumeURL)
         #expect(node.partitionIdentifier.hasPrefix("disk"))
-        #expect(node.wholeDeviceIdentifier.hasPrefix("disk"))
         #expect(node.partitionIdentifier.hasPrefix(node.wholeDeviceIdentifier))
+        #expect(node.wholeDeviceIdentifier.wholeMatch(of: /disk[0-9]+/) != nil)
+        // A card is always a slice of its device, so falling back to the partition identifier
+        // is a failure to resolve the whole disk, not an acceptable answer.
+        #expect(node.wholeDeviceIdentifier != node.partitionIdentifier)
     }
 
     /// Also set `CARDVAULT_DEVICE_EJECT=1`. This unmounts and ejects the device for real.
