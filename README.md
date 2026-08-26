@@ -83,11 +83,16 @@ swift test --disable-sandbox
 See the [manual removable-media procedure](Docs/manual-removable-media-test.md) for opt-in testing with
 a real card, APFS/HFS+/exFAT destinations, disconnections, sleep, exhausted space, and safe ejection.
 
+Progress throttling, transfer-rate and remaining-time estimates, and the internal tuning knobs behind
+them are described in [progress and performance](Docs/progress-performance.md), along with the
+benchmark used to choose their thresholds.
+
 ## Current limitations
 
 V1 resumes at whole-file boundaries, not partial-file offsets. Disk identity comes from a Disk
 Arbitration adapter behind a mockable service boundary; public URL volume metadata is the documented
 fallback when Disk Arbitration cannot describe a path, and identities resolved that way cannot claim
-two paths share a physical device. Automatic performance profiling and destructive real-media fault tests remain manual. Cloud,
+two paths share a physical device. Instruments profiling on representative cards and drives, and
+destructive real-media fault tests, remain manual. Cloud,
 catalog import, source deletion, formatting, privileged helpers, and proprietary libraries are outside
 the product boundary.

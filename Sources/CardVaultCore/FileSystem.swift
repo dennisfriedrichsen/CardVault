@@ -37,10 +37,25 @@ public actor FaultInjector {
 }
 
 public actor LocalFileSystem {
+    /// Reports incremental processed bytes while a read or write is in flight.
+    /// Handlers are expected to aggregate cheaply; they must never do UI work.
+    public typealias ByteHandler = @Sendable (Int64) async -> Void
+
     private let injector: FaultInjector?
+    private let chunkBytes: Int
     private let fileManager = FileManager()
 
-    public init(injector: FaultInjector? = nil) { self.injector = injector }
+    public init(injector: FaultInjector? = nil, chunkBytes: Int = TransferTuning.default.chunkBytes) {
+        self.injector = injector
+        self.chunkBytes = max(4096, chunkBytes)
+    }
+
+    /// Creates an independent file system actor that shares this one's fault
+    /// injector and chunk size. Bounded-concurrency work needs separate actors
+    /// because a single `LocalFileSystem` serialises every operation.
+    public func makePeer() -> LocalFileSystem {
+        LocalFileSystem(injector: injector, chunkBytes: chunkBytes)
+    }
 
     public func exists(_ url: URL) -> Bool { fileManager.fileExists(atPath: url.path) }
 
@@ -60,7 +75,8 @@ public actor LocalFileSystem {
         return Int64(values.fileSize ?? 0)
     }
 
-    public func checksum(_ url: URL, expectedSize: Int64? = nil) async throws -> String {
+    public func checksum(_ url: URL, expectedSize: Int64? = nil,
+                         onBytes: ByteHandler? = nil) async throws -> String {
         try await injector?.check(.read, url: url)
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -68,9 +84,10 @@ public actor LocalFileSystem {
         var bytesRead: Int64 = 0
         while true {
             try Task.checkCancellation()
-            guard let data = try handle.read(upToCount: 1_048_576), !data.isEmpty else { break }
+            guard let data = try handle.read(upToCount: chunkBytes), !data.isEmpty else { break }
             bytesRead += Int64(data.count)
             hash.update(data: data)
+            await onBytes?(Int64(data.count))
         }
         if let expectedSize, bytesRead != expectedSize {
             throw FileSystemError.sourceChanged(url.lastPathComponent)
@@ -78,7 +95,8 @@ public actor LocalFileSystem {
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    public func copyExclusive(from source: URL, to destination: URL, expectedSize: Int64) async throws {
+    public func copyExclusive(from source: URL, to destination: URL, expectedSize: Int64,
+                              onBytes: ByteHandler? = nil) async throws {
         try await injector?.check(.read, url: source)
         try await injector?.check(.write, url: destination)
         guard !fileManager.fileExists(atPath: destination.path) else {
@@ -95,9 +113,10 @@ public actor LocalFileSystem {
             var copied: Int64 = 0
             while true {
                 try Task.checkCancellation()
-                guard let data = try input.read(upToCount: 1_048_576), !data.isEmpty else { break }
+                guard let data = try input.read(upToCount: chunkBytes), !data.isEmpty else { break }
                 try output.write(contentsOf: data)
                 copied += Int64(data.count)
+                await onBytes?(Int64(data.count))
             }
             try output.synchronize()
             guard copied == expectedSize else { throw FileSystemError.sourceChanged(source.lastPathComponent) }

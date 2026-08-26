@@ -45,6 +45,8 @@ struct SettingsView: View {
             }
             Section("Performance") {
                 Text("File operations are intentionally bounded and sequential in V1 for predictable removable-media behavior.")
+                Text("Transfer rate and remaining time are estimates. They never affect verification.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).frame(width: 520, height: 260).padding()
     }
