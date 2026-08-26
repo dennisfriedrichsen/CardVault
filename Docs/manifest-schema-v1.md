@@ -31,5 +31,29 @@ Only source checksums are compared across manifests, because they do not depend 
 landed in. A record from another manifest is consulted only if that manifest's `schemaVersion` is one
 this build supports, and it still has to agree with a fresh read of the bytes on disk.
 
+## Relaunch recovery
+
+An unfinished transfer is discovered by its staging directory, named
+`.<transfer name>.cardvault-incomplete-<transfer UUID>`, which carries the transfer identity in the
+name so a scan can recognise a CardVault artifact before reading anything. The manifest inside is the
+only description of what happened; the UI state at the moment of the crash is not durable and is
+never guessed at.
+
+The manifest deliberately records no mount paths and no bookmark bytes, so recovery resolves the
+source and each destination from security-scoped bookmarks stored per transfer, then confirms each
+one against the recorded `VolumeIdentity`. Matching is by volume UUID or partition identifier only: a
+card reinserted at a different mount point still matches, and a reformatted card reusing its old
+label does not. A stale bookmark is renewed rather than discarded, because a drive that moved is not
+a drive that was lost.
+
+`abandonedAt` is set when the user explicitly abandons a transfer. The manifest and every file it
+describes stay on disk; the marker only stops recovery from offering the transfer again. It is
+additive, so `schemaVersion` remains 1. Abandoning never removes a source file, a verified file, a
+file awaiting a conflict decision, or anything CardVault did not write; only artifacts this manifest
+recorded as `copying` or `failed` may be removed, and only when the user asks for that explicitly.
+
+A manifest this build cannot decode, and one whose `schemaVersion` is newer than this build supports,
+are both reported to the user and never restarted.
+
 Updates are written to a sibling temporary file, then replace the current manifest. The preceding
 valid manifest is retained as `transfer-manifest.json.previous` for recovery from a damaged update.

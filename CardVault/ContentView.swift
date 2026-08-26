@@ -21,6 +21,9 @@ struct ContentView: View {
         .alert("CardVault Needs Attention", isPresented: Binding(
             get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } }
         )) { Button("OK") { model.errorMessage = nil } } message: { Text(model.errorMessage ?? "") }
+        .sheet(isPresented: $model.isPresentingRecovery) {
+            if let scan = model.recovery, !scan.isEmpty { RecoveryView(model: model, scan: scan) }
+        }
         .task { await model.refresh() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
             Task { await model.refreshDetectedVolumes() }
