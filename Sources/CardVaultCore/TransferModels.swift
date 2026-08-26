@@ -165,7 +165,10 @@ public struct TransferPlan: Codable, Sendable {
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
 }
 
-public enum CopyState: String, Codable, Sendable { case pending, copying, copied, skipped, failed }
+/// `skipped` means an existing destination file was cryptographically confirmed
+/// to already satisfy the transfer. `conflicted` means CardVault stopped rather
+/// than overwrite something it could not account for.
+public enum CopyState: String, Codable, Sendable { case pending, copying, copied, skipped, conflicted, failed }
 public enum VerificationResult: String, Codable, Sendable { case pending, verified, mismatch, failed }
 
 public struct DestinationFileResult: Codable, Hashable, Sendable {
@@ -173,12 +176,17 @@ public struct DestinationFileResult: Codable, Hashable, Sendable {
     public var verification: VerificationResult
     public var destinationChecksum: String?
     public var error: String?
+    /// How an existing file at this destination path was classified, when one
+    /// was found. Recorded durably so a skip or a pause stays auditable.
+    public var conflict: ConflictClassification?
 
     public init(copyState: CopyState = .pending, verification: VerificationResult = .pending,
-                destinationChecksum: String? = nil, error: String? = nil) {
+                destinationChecksum: String? = nil, error: String? = nil,
+                conflict: ConflictClassification? = nil) {
         self.copyState = copyState
         self.verification = verification
         self.destinationChecksum = destinationChecksum
         self.error = error
+        self.conflict = conflict
     }
 }
