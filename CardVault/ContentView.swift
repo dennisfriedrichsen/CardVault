@@ -57,7 +57,11 @@ struct TransferView: View {
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
                 if model.outcome == nil { startTransferButton }
-                if let progress = model.progress { PhaseProgress(progress: progress) }
+                if let copy = model.copyProgress { PhaseProgress(progress: copy) }
+                if let verification = model.verificationProgress { PhaseProgress(progress: verification) }
+                if model.isFinalizing && model.outcome == nil {
+                    Label("Finalizing verified transfer…", systemImage: "hourglass").font(.callout)
+                }
                 if let outcome = model.outcome { OutcomeView(outcome: outcome) }
             }.padding(24)
         }
@@ -195,18 +199,57 @@ private struct PreflightSummary: View {
 
 private struct PhaseProgress: View {
     let progress: TransferProgress
+
     var body: some View {
-        GroupBox(progress.phase == .copying ? "Copying" : progress.phase == .verifying ? "Verification" : "Finalizing") {
+        GroupBox(title) {
             VStack(alignment: .leading, spacing: 8) {
-                ProgressView(value: Double(progress.completedBytes), total: Double(max(progress.totalBytes, 1)))
+                ProgressView(value: progress.fractionCompleted)
                 HStack {
                     Text("\(progress.completedFiles) of \(progress.totalFiles) files")
                     Spacer()
                     Text(progress.currentRelativePath ?? "")
                         .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
                 }.font(.caption)
+                if let estimates {
+                    Text(estimates).font(.caption).foregroundStyle(.secondary)
+                        .accessibilityLabel("Estimated performance: \(estimates)")
+                }
+                if progress.phase == .copying && progress.isPhaseComplete {
+                    // Never present a finished copy as a finished transfer.
+                    Label("Copy complete — verification still in progress",
+                          systemImage: "exclamationmark.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }.accessibilityValue("\(progress.completedFiles) of \(progress.totalFiles) files")
+    }
+
+    private var title: String {
+        switch progress.phase {
+        case .copying: "Copying"
+        case .verifying: "Verification"
+        case .finalizing: "Finalizing"
+        }
+    }
+
+    /// Rate and remaining time are estimates and are labelled as such.
+    private var estimates: String? {
+        let parts = [rateText, remainingText].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        return "Estimated · " + parts.joined(separator: " · ")
+    }
+
+    private var rateText: String? {
+        guard let rate = progress.bytesPerSecond, rate > 0, rate.isFinite else { return nil }
+        return "\(Int64(rate).formatted(.byteCount(style: .file)))/s"
+    }
+
+    private var remainingText: String? {
+        guard let seconds = progress.estimatedSecondsRemaining, seconds.isFinite, seconds >= 1 else { return nil }
+        let clamped = min(seconds, 60 * 60 * 99)
+        let formatted = Duration.seconds(Int(clamped.rounded()))
+            .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated))
+        return "\(formatted) remaining"
     }
 }
 

@@ -16,7 +16,12 @@ final class AppModel {
     var mode: TransferMode = .preserveCard
     var scanResult: ScanResult?
     var preflight: PreflightResult?
-    var progress: TransferProgress?
+    /// Copy and verification progress are tracked separately so a completed copy
+    /// can never be rendered as a completed transfer, and so verification updates
+    /// do not invalidate the copy view.
+    var copyProgress: TransferProgress?
+    var verificationProgress: TransferProgress?
+    var isFinalizing = false
     var outcome: TransferOutcome?
     var history: [TransferHistoryEntry] = []
     var detectedVolumes: [MountedVolume] = []
@@ -87,12 +92,16 @@ final class AppModel {
         guard let plan = makePlan(), preflight?.canProceed == true else { return }
         isWorking = true
         outcome = nil
+        copyProgress = nil
+        verificationProgress = nil
+        isFinalizing = false
         message = "Copying — do not remove card yet"
         Task {
             do {
                 outcome = try await coordinator.execute(plan: plan) { [weak self] update in
                     await self?.receive(update)
                 }
+                isFinalizing = false
                 message = outcome?.state == .verified ? "Transfer fully verified — Safe to eject" : "Transfer needs attention — Safe to eject"
                 await recordHistory(from: outcome)
             } catch is CancellationError {
@@ -166,12 +175,26 @@ final class AppModel {
     }
 
     private func receive(_ update: TransferProgress) {
-        progress = update
         switch update.phase {
-        case .copying: message = "Copying — do not remove card yet"
-        case .verifying: message = "Verifying copied files — do not remove card yet"
-        case .finalizing: message = "Finalizing verified transfer"
+        case .copying:
+            copyProgress = update
+            // A copy at 100 percent is still not a success; verification decides.
+            setMessage(update.isPhaseComplete
+                       ? "Copy complete — verifying, do not remove card yet"
+                       : "Copying — do not remove card yet")
+        case .verifying:
+            verificationProgress = update
+            setMessage("Verifying copied files — do not remove card yet")
+        case .finalizing:
+            isFinalizing = true
+            setMessage("Finalizing verified transfer")
         }
+    }
+
+    /// `@Observable` publishes every assignment, so equal writes are dropped here
+    /// rather than re-invalidating every view that reads `message`.
+    private func setMessage(_ text: String) {
+        if message != text { message = text }
     }
 
     private func makePlan() -> TransferPlan? {
