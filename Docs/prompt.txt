@@ -1,0 +1,758 @@
+Act as the senior macOS engineer, product designer, and reliability engineer responsible for building CardVault.
+
+CardVault is a native macOS application that safely transfers photographs and videos from SD cards to the Mac or a directly attached external drive. Its defining promise is:
+
+“CardVault will not say your photographs are safe until every transferred file has been verified.”
+
+CardVault is not a photo browser, editor, culling tool, or asset-management library. Those responsibilities belong to SDelight, a separate read-only photography inspection application. CardVault owns ingestion, verification, recovery, transfer history, and safe ejection.
+
+## Initial repository assessment
+
+Begin by inspecting the existing repository completely. Identify:
+
+* The current project structure.
+* Deployment targets and Swift versions.
+* Existing functionality.
+* Current architecture and data models.
+* Tests and testability.
+* Unfinished or placeholder work.
+* Reusable CardVault code.
+* Features that now belong in SDelight instead.
+* Build warnings, failures, or broken dependencies.
+* Existing entitlements and sandbox configuration.
+
+Preserve useful existing work, but do not retain weak architecture merely because it already exists.
+
+Before implementation:
+
+1. Summarize the existing application and architecture.
+2. Compare the implementation against the requirements below.
+3. Identify functionality that should remain, be refactored, or be removed.
+4. Produce a concrete implementation plan organized into independently testable stages.
+5. Call out decisions that materially affect data integrity.
+6. Then implement the plan.
+
+Do not stop after proposing a plan unless an actual blocker requires my input. Make reasonable implementation decisions independently when they do not materially change the product.
+
+## Platform and technology
+
+Build CardVault as a native macOS 26-or-later application using:
+
+* Swift 6.2.
+* SwiftUI.
+* Strict Swift concurrency checking.
+* Foundation.
+* CryptoKit.
+* App Sandbox and security-scoped bookmarks.
+* Appropriate mounted-volume and filesystem APIs.
+* Disk Arbitration where appropriate for disk identification and safe ejection.
+* Swift Testing for core unit and integration tests.
+* XCTest only where needed for UI automation or capabilities not covered by Swift Testing.
+
+Do not build CardVault with Electron, Catalyst, React Native, or another cross-platform UI framework.
+
+The transfer engine must be independent of SwiftUI and testable without mounting a physical SD card.
+
+Use actors, immutable value types, `Sendable` models, structured concurrency, and explicit isolation boundaries. Treat concurrency warnings as possible correctness defects. Do not suppress them merely to make the project compile.
+
+Keep file I/O, hashing, scanning, and manifest persistence off the main actor. UI state updates must occur safely and must not block the interface.
+
+## macOS 26 design
+
+Adopt the native macOS 26 design through standard SwiftUI navigation, sidebar, inspector, sheet, toolbar, menu, table, and settings APIs.
+
+Use current toolbar organization APIs, including `ToolbarSpacer` where appropriate, to group related actions.
+
+Allow system controls and containers to provide the native Liquid Glass appearance automatically. Do not coat the content area in decorative glass effects or sacrifice legibility for visual novelty.
+
+CardVault should look like a focused, polished Mac utility—not an enlarged iPhone app.
+
+Use:
+
+* Native Mac window behavior.
+* Appropriate toolbar placement.
+* Keyboard shortcuts.
+* Context menus where useful.
+* Standard confirmation dialogs.
+* Native folder selection.
+* Finder integration.
+* Drag and drop only when it improves the workflow.
+* Full keyboard navigation.
+* VoiceOver labels and meaningful accessibility values.
+* Status communication that does not depend on color alone.
+
+Use restrained color. Color should reinforce transfer state, warnings, and success without making the application visually noisy.
+
+Use Xcode’s current SwiftUI performance instrumentation to confirm that frequent byte-progress updates do not cause excessive view invalidation. Aggregate or throttle UI progress updates without reducing the precision of the underlying transfer state.
+
+## Product boundaries
+
+CardVault must:
+
+* Detect mounted SD cards and other eligible removable source volumes.
+* Allow manual source selection when automatic detection is inconclusive.
+* Scan a selected source without modifying it.
+* Transfer files to the Mac or a directly attached external drive.
+* Support one primary destination and an optional second destination.
+* Verify the integrity of every destination copy.
+* Recover safely from interruption, application termination, volume disconnection, sleep, and destination-space exhaustion.
+* Maintain a durable, versioned, human-readable transfer manifest.
+* Maintain transfer history.
+* Clearly distinguish copying from verification.
+* Say “Safe to eject” only when CardVault has stopped reading the source.
+* Never imply that a card is safe to erase merely because one transfer completed.
+
+CardVault V1 must not:
+
+* Delete source files.
+* Erase or format cards.
+* Rename or reorganize files on the source.
+* Write metadata to source media.
+* Edit photographs.
+* Cull or rate photographs.
+* Import into Apple Photos, Lightroom, or another catalog.
+* Upload to cloud services.
+* Require an account.
+* Require a network connection.
+* Store photographs in a proprietary library.
+* Depend on Apple Intelligence or an on-device language model.
+
+Treat the source as strictly read-only from CardVault’s perspective.
+
+Do not introduce Foundation Models, File Provider, FSKit, cloud synchronization, or another new framework unless it solves a documented requirement that established filesystem APIs cannot handle cleanly.
+
+## Primary workflow
+
+Design and implement this workflow:
+
+1. The user inserts an SD card.
+2. CardVault detects it and scans its contents.
+3. CardVault identifies likely camera media and the source volume’s characteristics.
+4. The user chooses:
+
+   * A transfer or trip name.
+   * A primary destination.
+   * An optional backup destination.
+   * A transfer mode.
+5. CardVault presents a preflight summary:
+
+   * Source volume.
+   * Source filesystem.
+   * Total files and bytes.
+   * Counts by media type.
+   * RAW/JPEG pair count when identifiable.
+   * New files.
+   * Files already transferred.
+   * Conflicts or ambiguous duplicates.
+   * Excluded files.
+   * Space required.
+   * Available space at each destination.
+   * Destination filesystem.
+   * Any limitations or warnings.
+6. The user begins the transfer.
+7. CardVault creates an explicitly incomplete transfer location.
+8. CardVault copies the planned files.
+9. CardVault reads the completed destination files and verifies their checksums.
+10. CardVault finalizes the destination only after every required file passes verification.
+11. CardVault presents an accurate result:
+
+* Transfer verified.
+* Verified on primary destination.
+* Verified on backup destination, if configured.
+* Partially successful, if destinations have different outcomes.
+* Safe to eject.
+* Show in Finder.
+* Open in SDelight, if integration is supported.
+
+Copying reaching 100% must never imply that verification is complete.
+
+## Transfer modes
+
+Implement these understandable transfer modes.
+
+### Preserve Card
+
+Copy the complete source structure without reorganizing or renaming anything.
+
+This should be the recommended and default mode for camera cards. It retains everything written by the camera and postpones organizational decisions.
+
+### Media Only
+
+Copy recognized photograph and video files while preserving their relative source directories.
+
+Before transfer, clearly disclose which files will be excluded. Never delete or alter excluded files.
+
+Recognize common media types, including:
+
+* Canon RAW files such as CR3.
+* Other common camera RAW formats when supported by system type identification.
+* JPEG.
+* HEIF and HEIC.
+* TIFF.
+* PNG.
+* Common camera video formats.
+* Associated sidecars such as XMP when present.
+
+Do not rely entirely on filename extensions when system type identification can provide better information, but handle unknown files safely.
+
+### Custom Destination
+
+Copy selected content into an existing user-selected folder without imposing a proprietary library structure.
+
+Do not add date-based reorganization to the initial implementation unless it can be added without complicating the transfer engine or recovery model.
+
+## Destination structure
+
+For a newly named transfer, use a structure conceptually similar to:
+
+```text
+Photos/
+└── 2026-09 South Korea and China/
+    ├── Originals/
+    │   └── [preserved card contents]
+    └── .cardvault/
+        └── transfer-manifest.json
+```
+
+Use an explicitly incomplete or staging name while work is in progress. Do not expose an incomplete transfer as finalized.
+
+Choose finalization behavior appropriate to the destination filesystem. Use an atomic move when the filesystem supports the required semantics. Do not assume all filesystems provide identical atomicity or metadata behavior.
+
+Do not assume every external drive is APFS. Account for:
+
+* APFS.
+* HFS+.
+* exFAT.
+* Case-sensitive and case-insensitive destinations.
+* Different filename and metadata limitations.
+* Volumes that may disappear without warning.
+
+Detect and clearly report unsupported capabilities, filename conflicts, path-length problems, and filesystem-specific limitations.
+
+## Preflight validation
+
+Before copying, validate:
+
+* Source availability.
+* Source readability.
+* Destination availability.
+* Destination write permission.
+* Security-scoped resource access.
+* Required free space.
+* Reserved safety margin.
+* Maximum file-size restrictions.
+* Path and filename compatibility.
+* Case-folding collisions.
+* Whether primary and backup resolve to the same physical volume.
+* Whether a destination is located inside the source.
+* Whether the destination contains an unfinished or completed transfer with the same name.
+* Whether source and destination identities changed since configuration.
+* Whether the destination is a directly attached local volume or something with different reliability semantics.
+
+Do not allow the user to accidentally choose the SD card itself as a destination.
+
+If the primary and backup folders are on the same physical device, warn that they are not independent copies.
+
+## Verification and integrity
+
+Use SHA-256 for content verification.
+
+For every transferred file:
+
+1. Record the source-relative path.
+2. Record the source size.
+3. Record relevant source timestamps and file attributes.
+4. Calculate the source SHA-256 checksum.
+5. Copy the file.
+6. Flush and close the destination file correctly.
+7. Confirm the destination size.
+8. Calculate the destination SHA-256 checksum by reading the completed destination file.
+9. Compare source and destination checksums.
+10. Mark the file verified only when the checksums match.
+
+Do not treat any of the following as complete verification:
+
+* A successful write call.
+* A matching filename.
+* A matching timestamp.
+* A matching byte count.
+* A destination file merely existing.
+* A cached checksum not tied to a durable manifest.
+
+If two destinations are selected, verify each destination independently.
+
+A successful primary copy must not obscure a failed or incomplete backup copy. Present per-destination and overall status separately.
+
+Use bounded concurrency so performance is good without overwhelming slower SD cards or external drives. Make concurrency configurable internally for testing and tuning.
+
+Prefer predictable sequential source reading when it performs better on removable media. Optimize only after measuring.
+
+## Durable manifest
+
+Create a versioned, human-readable JSON transfer manifest.
+
+It must contain, at minimum:
+
+* Manifest schema version.
+* CardVault application version.
+* Stable transfer UUID.
+* Transfer or trip name.
+* Manifest creation date.
+* Transfer start date.
+* Completion date.
+* Verification date.
+* Current transfer state.
+* Selected transfer mode.
+* Source volume metadata available through public APIs.
+* Source filesystem information.
+* Destination metadata.
+* Destination filesystem information.
+* Relative source path for every planned file.
+* Relative destination path.
+* Media classification.
+* Byte count.
+* Relevant timestamps.
+* Source checksum.
+* Copy state.
+* Verification result for each destination.
+* Errors and warnings.
+* Overall result.
+* Any recovery information needed to continue safely.
+
+Use ISO 8601 dates and a documented manifest schema.
+
+Write manifest updates durably as the transfer progresses so an interrupted operation can be reconstructed.
+
+Use safe temporary-file-and-replacement behavior for manifest updates. Never risk destroying the last valid manifest while writing a new version.
+
+Do not make the manifest dependent on absolute mount paths remaining unchanged.
+
+Do not include unnecessary personal information.
+
+The photographs must remain usable without CardVault, and the manifest must be readable by people and other applications.
+
+## Transfer state machine
+
+Implement the transfer as an explicit durable state machine rather than one long UI task.
+
+At minimum, support:
+
+* Discovering source
+* Scanning
+* Ready
+* Preflighting
+* Awaiting confirmation
+* Copying
+* Copy complete
+* Verifying
+* Verified
+* Interrupted
+* Needs attention
+* Partially successful
+* Failed
+* Cancelled
+* Safe to eject
+
+Define valid transitions. Invalid transitions should produce clear development-time failures and safe production behavior.
+
+The source can be considered safe to eject only when:
+
+* No source file handle remains open.
+* No hashing or scanning task is reading the source.
+* All manifest state necessary for recovery has been persisted.
+* The application has released active access to the source.
+
+“Safe to eject” does not mean “safe to erase.”
+
+## Interruption and recovery
+
+On relaunch, CardVault must detect unfinished transfers and offer to resume, inspect, or abandon them safely.
+
+Recovery must handle:
+
+* Source removed during scanning.
+* Source removed during copying.
+* Source removed during verification if source access is still required.
+* Destination removed while copying.
+* Destination removed while verifying.
+* Application quit.
+* Application crash.
+* Forced termination.
+* Mac sleep and wake.
+* Destination becoming full.
+* Permission loss.
+* Security-scoped bookmark resolution failure.
+* Stale security-scoped bookmarks.
+* Existing partial destination files.
+* A source file changing unexpectedly during transfer.
+* The same card being reinserted.
+* A destination being reattached at a different mount path.
+* A destination folder being moved or renamed.
+* A verification mismatch.
+* Manifest damage or an unsupported future manifest version.
+
+Never silently restart in a way that overwrites verified data.
+
+Resume at file boundaries initially. Partial-file resumption may be postponed unless it can be implemented and tested rigorously.
+
+If a file was completely copied but not marked verified before interruption, verify it rather than automatically copying it again.
+
+If an incomplete file cannot be trusted, remove or quarantine only the incomplete destination artifact. Never remove a source file or an unrelated preexisting destination file.
+
+Cancellation must stop at a safe boundary and persist an accurate resumable state.
+
+## Duplicate and conflict handling
+
+Do not rely solely on filenames.
+
+Classify existing destination files as:
+
+* Already verified by the current transfer manifest.
+* Previously verified by another compatible CardVault manifest.
+* Content-identical.
+* Same relative path but different content.
+* Unrelated existing file.
+* Incomplete prior copy.
+* Ambiguous and requiring attention.
+
+Identical files may be skipped only after sufficient verification.
+
+Conflicting files must never be silently overwritten.
+
+Use a safe default: pause and present the conflict rather than inventing a new filename automatically.
+
+Do not interpret a matching filename and byte count as proof of identical content.
+
+## Volume identity and permissions
+
+Use public macOS APIs to gather stable volume metadata where available.
+
+Do not identify a source or destination solely by its current mount path or display name.
+
+Persist user-authorized folder access using security-scoped bookmarks where appropriate. Correctly balance all calls that begin and end access to security-scoped resources.
+
+Handle stale bookmarks explicitly.
+
+Distinguish:
+
+* A volume with the same name.
+* The same volume mounted at a different path.
+* A newly formatted card.
+* A different card reusing the same volume label.
+* Multiple cards or drives with identical display names.
+
+Use Disk Arbitration where it materially improves disk identity or safe ejection. Keep it behind a protocol or service boundary so it can be mocked in tests.
+
+Do not request privileged access or install a privileged helper unless a documented requirement genuinely requires it.
+
+## Recommended architecture
+
+Use clear components with narrow responsibilities, such as:
+
+* `VolumeDiscoveryService`
+* `VolumeIdentity`
+* `SourceScanner`
+* `MediaClassifier`
+* `TransferPreflightService`
+* `TransferPlan`
+* `TransferCoordinator`
+* `CopyEngine`
+* `ChecksumService`
+* `VerificationEngine`
+* `ManifestStore`
+* `RecoveryCoordinator`
+* `SecurityScopedBookmarkStore`
+* `TransferHistoryStore`
+* `DiskEjectionService`
+* SwiftUI presentation models
+* SDelight integration service
+
+Names may vary if the repository has good conventions, but preserve these separations.
+
+The core transfer engine must not import SwiftUI.
+
+UI models may observe durable engine state, but the UI must not be the authoritative owner of transfer state.
+
+Do not put the entire workflow into one view model.
+
+Use dependency injection so filesystem operations, hashing, volume discovery, persistence, clock behavior, and failures can be controlled in tests.
+
+## User interface
+
+Design the primary window around three conceptual areas:
+
+* Source.
+* Transfer configuration.
+* Destinations.
+
+The interface must communicate:
+
+* Detected source.
+* Scanning progress.
+* Selected transfer mode.
+* Transfer name.
+* Primary destination.
+* Optional backup destination.
+* Preflight results.
+* Copy progress.
+* Verification progress.
+* Current file where useful.
+* Total files and bytes.
+* Completed files and bytes.
+* Transfer rate.
+* Estimated remaining time, labeled as an estimate.
+* Per-destination status.
+* Warnings and actions.
+* Safe-ejection state.
+
+Use explicit wording for these important states:
+
+* Ready to transfer
+* Copying
+* Copy complete—verification not started
+* Verifying copied files
+* Transfer fully verified
+* Primary verified—backup incomplete
+* Transfer interrupted
+* Transfer needs attention
+* Transfer failed
+* Safe to eject
+* Do not remove card yet
+
+Do not use a generic progress bar that reaches 100% before verification finishes.
+
+Prefer separate copy and verification progress indicators or an unmistakable phased indicator.
+
+Do not show a generic success screen when the primary destination succeeded but the configured backup failed.
+
+## Transfer history
+
+Transfer history should show:
+
+* Transfer name.
+* Date.
+* Source identity.
+* Destination or destinations.
+* Total files.
+* Total bytes.
+* Transfer mode.
+* Final state.
+* Verification state for each destination.
+* Outstanding warnings.
+* Whether the destination is currently available.
+
+Allow the user to inspect the manifest and reveal available destinations in Finder.
+
+Transfer history is informational. It must not become a proprietary catalog required to access the photographs.
+
+Use an appropriate local persistence mechanism for history indexing, but keep the JSON transfer manifest as the authoritative portable transfer record.
+
+## SDelight boundary and integration
+
+SDelight is a separate privacy-first, read-only inspection application. It deliberately does not copy, move, rename, delete, or import files.
+
+CardVault may integrate with SDelight after a verified transfer by:
+
+* Revealing the completed destination in Finder.
+* Opening the destination through a documented URL scheme or application-opening mechanism if SDelight provides one.
+* Allowing SDelight to recognize a CardVault verification manifest in the future.
+
+Do not copy SDelight functionality into CardVault, including:
+
+* General photo browsing.
+* Photo culling.
+* Ratings.
+* Histograms.
+* Focus or sharpness analysis.
+* Pixel inspection.
+* Image comparison.
+* Burst review.
+* Photography analytics.
+
+If the existing CardVault repository contains functionality that now belongs to SDelight, isolate or remove it as appropriate and explain the decision.
+
+Do not make CardVault depend on SDelight being installed.
+
+## Error presentation
+
+Do not conceal errors behind fallback behavior.
+
+Every significant error should communicate:
+
+* What operation failed.
+* Which file or destination was affected.
+* Whether the source remains untouched.
+* Whether any destination copy has already been verified.
+* Whether the transfer can resume.
+* What action the user can take next.
+
+Avoid alarming language when verified data remains intact, but never minimize uncertainty.
+
+Logs should contain sufficient technical detail for diagnosis without exposing unnecessary personal information.
+
+Use Apple’s unified logging facilities appropriately. Do not log security-scoped bookmark data or sensitive full paths unnecessarily.
+
+## Testing requirements
+
+Reliability tests are a primary deliverable, not cleanup work.
+
+Create unit and integration tests covering:
+
+* Manifest encoding and decoding.
+* Manifest schema-version handling.
+* Manifest migration.
+* Atomic manifest updates.
+* Recovery from an interrupted manifest write.
+* Valid and invalid state-machine transitions.
+* Exact source-to-destination path mapping.
+* SHA-256 verification.
+* Successful single-destination transfer.
+* Successful dual-destination transfer.
+* Primary success with backup failure.
+* Backup success with primary failure.
+* Source disconnection.
+* Destination disconnection.
+* Insufficient free space.
+* Permission failure.
+* Security-scoped bookmark failure.
+* Stale bookmark recovery.
+* Checksum mismatch.
+* Existing identical file.
+* Existing conflicting file.
+* Existing partial file.
+* Interrupted transfer and relaunch recovery.
+* Cancellation.
+* Empty card.
+* Large files.
+* Zero-byte files.
+* Unicode filenames.
+* Case-sensitive and case-insensitive filename collisions.
+* exFAT-incompatible names or semantics where applicable.
+* RAW/JPEG pair classification without treating a pair as one physical file.
+* Source files changing during transfer.
+* Destination files changing before verification.
+* Same volume mounted at a different path.
+* Two volumes with the same display name.
+* Primary and backup residing on the same physical volume.
+* Destination accidentally located inside the source.
+* UI progress aggregation.
+* Strict concurrency correctness.
+
+Build a fault-injection abstraction so tests can simulate:
+
+* Read errors.
+* Write errors.
+* Short reads.
+* Short writes.
+* Volume disconnections.
+* Checksum corruption.
+* Full destination.
+* Permission changes.
+* Sleep and wake.
+* Application termination between manifest updates.
+* Failure immediately before and after finalization.
+* Failure after a file copy but before its verification state is persisted.
+
+Use temporary directories in automated tests. Do not require a physical SD card for the main test suite.
+
+Add a small set of opt-in manual integration tests for real removable media.
+
+## Development stages
+
+Work incrementally:
+
+1. Inspect and document the repository.
+2. Establish the core models and transfer state machine.
+3. Implement manifest persistence and recovery.
+4. Implement source scanning and media classification.
+5. Implement preflight validation.
+6. Implement single-destination copying and SHA-256 verification.
+7. Add fault-injection infrastructure and reliability tests.
+8. Implement interruption recovery.
+9. Add optional second-destination support.
+10. Build the native macOS 26 interface around the tested engine.
+11. Add mounted-volume detection and persistent permissions.
+12. Add transfer history and safe ejection.
+13. Add Finder and optional SDelight handoff.
+14. Polish accessibility, keyboard behavior, menus, and error presentation.
+15. Profile UI updates and transfer performance.
+16. Run the complete test suite and perform final application builds.
+
+After every material stage:
+
+* Build the project.
+* Run the relevant tests.
+* Fix warnings and failures before continuing.
+* Review concurrency and data-integrity risks.
+* Keep the repository in a runnable state.
+* Update project documentation when architecture or behavior changes.
+
+Do not disable tests, weaken assertions, or swallow errors merely to achieve a passing build.
+
+## Documentation
+
+Create or update repository documentation covering:
+
+* CardVault’s product promise.
+* Product boundaries.
+* Supported macOS version.
+* Supported source and destination types.
+* Transfer and verification behavior.
+* Meaning of “Safe to eject.”
+* The fact that CardVault never declares a card safe to erase.
+* Manifest format and schema version.
+* Recovery behavior.
+* Known filesystem limitations.
+* Architecture overview.
+* Build and test instructions.
+* Manual removable-media test procedure.
+* SDelight integration boundary.
+
+Document any behavior that differs across APFS, HFS+, and exFAT.
+
+## Completion criteria
+
+CardVault is not complete merely because it can copy a directory.
+
+The implementation is complete only when:
+
+* The project builds cleanly for macOS 26.
+* Strict concurrency checking is enabled.
+* The core transfer engine is independent of SwiftUI.
+* Automated tests cover successful and failed transfer paths.
+* An interrupted transfer can be reconstructed from durable state.
+* Destination files are read and cryptographically verified.
+* Dual destinations have independent outcomes.
+* Conflicting files are never silently overwritten.
+* The UI distinguishes copying from verification.
+* The source is never modified.
+* “Safe to eject” is shown only after all source access ends.
+* The app never says “safe to erase.”
+* The principal UI states are polished and accessible.
+* The repository contains clear build, test, and manual-validation instructions.
+
+## Final report
+
+When finished, provide:
+
+* A concise description of what was implemented.
+* The resulting architecture.
+* Important data-integrity decisions.
+* Files or major components added and changed.
+* Exact build results.
+* Exact automated test results.
+* Any warnings that remain and why.
+* Remaining limitations.
+* A short manual test plan using a real SD card and an external drive.
+* Screenshots or previews of the principal application states if the environment supports them.
+* Recommended next steps, clearly separated from the completed V1 work.
+
+The priority order is:
+
+1. Never lose or corrupt source data.
+2. Never claim verification that did not occur.
+3. Recover predictably from interruption.
+4. Never silently overwrite a conflict.
+5. Explain status clearly.
+6. Deliver a polished native Mac experience.
+7. Optimize performance only after correctness is established.
