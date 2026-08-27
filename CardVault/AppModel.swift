@@ -159,10 +159,16 @@ final class AppModel {
             do {
                 let result = try await Task.detached { try SourceScanner().scan(root: sourceURL, mode: selectedMode) }.value
                 scanResult = result
+                // Preflight declines to speak while work is in flight, so the
+                // scan has to be over before it can replace "scanning" with the
+                // state the user acts on next.
+                isWorking = false
                 if result.files.isEmpty { setStatus(.noTransferableFiles) }
                 updatePreflight()
-            } catch { present(error, operation: "Scanning source") }
-            isWorking = false
+            } catch {
+                present(error, operation: "Scanning source")
+                isWorking = false
+            }
         }
     }
 
@@ -455,7 +461,10 @@ final class AppModel {
         let scan = await recoveryCoordinator.scan(destinationRoots: roots, sourceRoots: sources,
                                                   transferDestinationRoots: destinations)
         recovery = scan
-        if !scan.isEmpty { isPresentingRecovery = true }
+        // The sheet's only way out lives beside the transfers it lists, so a
+        // scan that has emptied out — the last transfer resumed or abandoned —
+        // would leave an empty sheet with nothing left to dismiss it.
+        isPresentingRecovery = !scan.isEmpty
     }
 
     func resume(_ transfer: RecoverableTransfer) {
