@@ -79,12 +79,29 @@ struct UIStatePresentationTests {
         #expect(presentation.detail.localizedCaseInsensitiveContains("not a finished transfer"))
     }
 
-    /// Only a run where every destination verified may read as success.
+    /// Only a run where every destination verified may read as success. A verified
+    /// transfer whose copies all live on a server qualifies — the bytes were read
+    /// back off the server to prove it — and says where they went in its own words.
     @Test("Only fully verified states carry the success tone")
     func successToneIsEarned() {
         let successes = PrincipalUIState.allCases.filter { StatusPresentation.for($0).tone == .success }
-        #expect(Set(successes) == Set([.verified, .safeToEject, .ejected]))
+        #expect(Set(successes) == Set([.verified, .verifiedNetworkOnly, .safeToEject, .ejected]))
         #expect(StatusPresentation.for(.primaryVerifiedBackupIncomplete).tone == .attention)
+    }
+
+    /// Success alone would hide the one thing that separates this run from a fully
+    /// local one, and the user cannot see a share's absence until they need it.
+    @Test("A verified network-only transfer says where the copies are")
+    func networkOnlyStateNamesItsStorage() {
+        let presentation = StatusPresentation.for(.verifiedNetworkOnly)
+        #expect(presentation.title.localizedCaseInsensitiveContains("network storage"))
+        #expect(presentation.title.localizedCaseInsensitiveContains("safe to eject"))
+        #expect(presentation.detail.localizedCaseInsensitiveContains("server"))
+        #expect(presentation.announcement.localizedCaseInsensitiveContains("not on a disk attached to this Mac"))
+        // The transfer really is verified, so the promise it shares with `.verified`
+        // has to survive the extra sentence.
+        #expect(presentation.detail.localizedCaseInsensitiveContains("does not mean safe to erase"))
+        #expect(StatusPresentation.for(.verified).title != presentation.title)
     }
 
     @Test("The paused status counts the files it is waiting on")
@@ -247,6 +264,44 @@ struct UIStateFixtureTests {
         let empty = UIStateFixture.fixture(for: .noTransferableFiles)
         #expect(empty.scan?.files.isEmpty == true)
         #expect(empty.scan?.excludedFiles.isEmpty == false)
+    }
+
+    /// The two verified fixtures carry identical results, which is the point: what separates
+    /// the states is where the destinations live, and that is only in the plan.
+    @Test("A verified transfer is network-only when its destinations are")
+    func networkOnlyIsDecidedByTheDestinations() throws {
+        let networkPlan = [DestinationPlan(id: UIStateFixture.primaryDestinationID, label: "Primary",
+                                           rootPath: "/Volumes/files-photos",
+                                           volume: UIStateFixture.networkPrimaryVolume),
+                           DestinationPlan(id: UIStateFixture.backupDestinationID, label: "Backup",
+                                           rootPath: "/Volumes/files-fast",
+                                           volume: UIStateFixture.networkBackupVolume)]
+        let localPlan = [DestinationPlan(id: UIStateFixture.primaryDestinationID, label: "Primary",
+                                         rootPath: "/Volumes/Field Archive",
+                                         volume: UIStateFixture.primaryVolume),
+                         DestinationPlan(id: UIStateFixture.backupDestinationID, label: "Backup",
+                                         rootPath: "/Volumes/Backup Shuttle",
+                                         volume: UIStateFixture.backupVolume)]
+        let outcome = UIStateFixture.networkVerifiedOutcome
+        #expect(outcome.isOnNetworkStorageOnly(given: networkPlan))
+        #expect(!outcome.isOnNetworkStorageOnly(given: localPlan))
+        // One local copy is enough to make the transfer not network-only.
+        #expect(!outcome.isOnNetworkStorageOnly(given: [networkPlan[0], localPlan[1]]))
+        // A plan that does not describe the destinations cannot claim they are remote.
+        #expect(!outcome.isOnNetworkStorageOnly(given: []))
+    }
+
+    @Test("The network-only fixture warns about every share and blocks nothing")
+    func networkOnlyFixtureWarns() throws {
+        let preflight = try #require(UIStateFixture.fixture(for: .verifiedNetworkOnly).preflight)
+        #expect(preflight.canProceed)
+        #expect(preflight.issues.allSatisfy { $0.severity == .warning })
+        #expect(preflight.issues.filter { $0.code == "network-destination" }.count == 2)
+        #expect(preflight.issues.contains { $0.code == "network-only" })
+        // Two pools on one NAS: called out, and not called one pool.
+        let sameServer = try #require(preflight.issues.first { $0.code == "same-server" })
+        #expect(sameServer.message.contains("mercury.local"))
+        #expect(!sameServer.message.contains("same free space"))
     }
 
     @Test("The blocked fixture cannot proceed and the warning fixture can")

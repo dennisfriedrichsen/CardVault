@@ -487,8 +487,10 @@ public actor RecoveryCoordinator {
         switch recorded.relation(to: current) {
         case .sameVolume: return .matched
         // A different partition of the same physical device is still a different
-        // volume, so it is a mismatch rather than a match.
-        case .sameDevice, .distinct: return .mismatched
+        // volume, so it is a mismatch rather than a match. A different export on
+        // the server this transfer used is the same story: one machine, but not
+        // the tree these files were written to.
+        case .sameDevice, .sameServer, .distinct: return .mismatched
         case .indeterminate: return .indeterminate
         }
     }

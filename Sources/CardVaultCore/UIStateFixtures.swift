@@ -71,6 +71,14 @@ extension UIStateFixture {
         case .verified:
             return base(state, copyProgress: copyCompleteProgress, verificationProgress: verifiedProgress,
                         outcome: verifiedOutcome)
+        // Both destinations are shares on one NAS, which is the configuration that makes this
+        // state worth having: verified, safe to eject, and nothing on a disk in the room.
+        case .verifiedNetworkOnly:
+            return base(state, preflight: networkOnlyPreflight,
+                        destinationName: networkPrimaryVolume.displayName,
+                        backupName: networkBackupVolume.displayName,
+                        copyProgress: copyCompleteProgress, verificationProgress: verifiedProgress,
+                        outcome: networkVerifiedOutcome)
         case .primaryVerifiedBackupIncomplete:
             return base(state, copyProgress: copyCompleteProgress, verificationProgress: verifiedProgress,
                         outcome: partialOutcome)
@@ -123,6 +131,24 @@ extension UIStateFixture {
         resourceIdentifier: "disk6s2", displayName: "Backup Shuttle", fileSystem: "APFS",
         isRemovable: true, isLocal: true, identitySource: .diskArbitration)
 
+    /// Two NFS exports from one NAS, drawn from the setup issue #41 was measured on: one host,
+    /// two pools, so they warn as `same-server` without the wording that describes one pool
+    /// exported twice. A network mount reports no volume UUID and no BSD device, which is why
+    /// both of these carry neither.
+    public static let networkPrimaryVolume = VolumeIdentity(
+        displayName: "files-photos", fileSystem: "Network File System (NFS)",
+        isRemovable: false, isLocal: false, identitySource: .urlResourceValues,
+        networkOrigin: NetworkVolumeOrigin(host: "mercury.local",
+                                           exportPath: "/mnt/tank/files-photos",
+                                           fileSystemType: "nfs"))
+
+    public static let networkBackupVolume = VolumeIdentity(
+        displayName: "files-fast", fileSystem: "Network File System (NFS)",
+        isRemovable: false, isLocal: false, identitySource: .urlResourceValues,
+        networkOrigin: NetworkVolumeOrigin(host: "mercury.local",
+                                           exportPath: "/mnt/tank001/files-fast",
+                                           fileSystemType: "nfs"))
+
     public static let sourceFiles: [SourceFile] = {
         let names = ["IMG_0431", "IMG_0432", "IMG_0433", "IMG_0434", "IMG_0435", "IMG_0436"]
         var files: [SourceFile] = names.enumerated().flatMap { index, name -> [SourceFile] in
@@ -173,15 +199,19 @@ extension UIStateFixture {
 
     private static let primaryRootPath = "/Volumes/Field Archive/Transfers"
     private static let backupRootPath = "/Volumes/Backup Shuttle/Transfers"
+    private static let networkPrimaryRootPath = "/Volumes/files-photos/Transfers"
+    private static let networkBackupRootPath = "/Volumes/files-fast/Transfers"
 
-    private static func plan(primary: VolumeIdentity, backup: VolumeIdentity) -> TransferPlan {
+    private static func plan(primary: VolumeIdentity, backup: VolumeIdentity,
+                             primaryRoot: String = primaryRootPath,
+                             backupRoot: String = backupRootPath) -> TransferPlan {
         TransferPlan(id: transferID, name: "2026-08-26", mode: .preserveCard,
                      sourceRootPath: "/Volumes/EOS_DIGITAL", sourceVolume: cardVolume,
                      files: sourceFiles,
                      destinations: [DestinationPlan(id: primaryDestinationID, label: "Primary",
-                                                    rootPath: primaryRootPath, volume: primary),
+                                                    rootPath: primaryRoot, volume: primary),
                                     DestinationPlan(id: backupDestinationID, label: "Backup",
-                                                    rootPath: backupRootPath, volume: backup)])
+                                                    rootPath: backupRoot, volume: backup)])
     }
 
     /// Two partitions of one physical device. This is the warning worth showing:
@@ -217,6 +247,15 @@ extension UIStateFixture {
     static let blockedPreflight = preflight(
         plan(primary: independentPrimaryVolume, backup: sharedDeviceBackupVolume),
         capacity: { url in url.path == primaryRootPath ? 1_073_741_824 : 240_000_000_000 })
+
+    /// `network-destination` for each share, `network-only` for the transfer, and `same-server`
+    /// for the pair — every warning the NAS-only configuration raises, and no block. The free
+    /// space is the pair's measured figures, which differ, so the same-server wording stops at
+    /// what CardVault cannot confirm instead of describing one pool exported twice.
+    static let networkOnlyPreflight = preflight(
+        plan(primary: networkPrimaryVolume, backup: networkBackupVolume,
+             primaryRoot: networkPrimaryRootPath, backupRoot: networkBackupRootPath),
+        capacity: { url in url.path == networkPrimaryRootPath ? 5_190_304_702_464 : 843_017_334_784 })
 
     // MARK: - Progress
 
@@ -274,6 +313,24 @@ extension UIStateFixture {
                        DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 13,
                                           failedFiles: 0, finalURL: backupURL,
                                           manifestURL: TransferLayout.manifestURL(inStaging: backupURL))],
+        safeToEject: true)
+
+    private static let networkPrimaryURL = URL(filePath: "/Volumes/files-photos/2026-08-26",
+                                               directoryHint: .isDirectory)
+    private static let networkBackupURL = URL(filePath: "/Volumes/files-fast/2026-08-26",
+                                              directoryHint: .isDirectory)
+
+    /// Fully verified, and every copy on a share. The outcome is indistinguishable from
+    /// `verifiedOutcome` — which is the point: what separates the two states is where the
+    /// destinations live, so the state cannot be derived from the outcome alone.
+    static let networkVerifiedOutcome = TransferOutcome(
+        transferID: transferID, state: .verified,
+        destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 13,
+                                          failedFiles: 0, finalURL: networkPrimaryURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: networkPrimaryURL)),
+                       DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 13,
+                                          failedFiles: 0, finalURL: networkBackupURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: networkBackupURL))],
         safeToEject: true)
 
     /// A verified primary never masks a failed backup, so the fixture keeps both

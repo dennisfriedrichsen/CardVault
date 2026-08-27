@@ -234,13 +234,20 @@ struct CoreTests {
             let result = service.validate(plan)
 
             #expect(result.canProceed)
-            #expect(!result.issues.contains { $0.code == "insufficient-space" || $0.code == "non-local" })
-            #expect(result.issues.contains { $0.code == "network-backup" && $0.severity == .warning })
+            #expect(!result.issues.contains { $0.code == "insufficient-space" })
+            #expect(result.issues.contains { $0.code == "network-destination" && $0.severity == .warning })
+            // One copy is local, so the transfer as a whole is not network-only.
+            #expect(!result.issues.contains { $0.code == "network-only" })
             #expect(result.destinations[1].availableBytes == 5_000)
         }
     }
 
-    @Test("Preflight still requires a local primary")
+    /// The rule this replaces blocked any network Primary and keyed that on the
+    /// destination's position in the list, so a NAS-only archive could not run at
+    /// all. Verification over a share is real — the copy is closed and reopened
+    /// before it is read back — so the standing dependency on the server is a
+    /// warning the user accepts, not a refusal.
+    @Test("A network destination with no local copy anywhere warns and still runs")
     func networkPrimary() throws {
         try withTemporaryDirectorySync { root in
             let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
@@ -252,7 +259,39 @@ struct CoreTests {
 
             let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 5_000 }.validate(plan)
 
-            #expect(result.issues.contains { $0.code == "non-local" && $0.severity == .blocking })
+            #expect(result.canProceed)
+            #expect(!result.issues.contains { $0.severity == .blocking })
+            #expect(result.issues.contains { $0.code == "network-destination" && $0.severity == .warning })
+            let onlyCopy = try #require(result.issues.first { $0.code == "network-only" })
+            #expect(onlyCopy.severity == .warning)
+            // The warning has to say what the user is accepting, not merely that
+            // something is unusual.
+            #expect(onlyCopy.message.localizedCaseInsensitiveContains("verified"))
+            #expect(onlyCopy.message.localizedCaseInsensitiveContains("no copy will be on a disk attached to this Mac"))
+        }
+    }
+
+    /// The same warning is due whichever position the network destination holds,
+    /// because the risk is a property of the mount and not of the list index.
+    @Test("A network Primary alongside a local Backup is not network-only")
+    func networkPrimaryWithLocalBackup() throws {
+        try withTemporaryDirectorySync { root in
+            let primary = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            let backup = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: primary); try? FileManager.default.removeItem(at: backup) }
+            var plan = makePlan(source: root, destinations: [primary, backup], files: [])
+            plan.destinations[0].volume.fileSystem = "Network File System (NFS)"
+            plan.destinations[0].volume.isLocal = false
+
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 5_000 }.validate(plan)
+
+            #expect(result.canProceed)
+            let network = result.issues.filter { $0.code == "network-destination" }
+            #expect(network.count == 1)
+            #expect(network[0].message.hasPrefix("Primary"))
+            #expect(!result.issues.contains { $0.code == "network-only" })
         }
     }
 

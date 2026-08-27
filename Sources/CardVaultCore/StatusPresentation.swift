@@ -22,6 +22,7 @@ public enum PrincipalUIState: String, CaseIterable, Sendable {
     case verifying
     case finalizing
     case verified
+    case verifiedNetworkOnly
     case primaryVerifiedBackupIncomplete
     case conflictPaused
     case interrupted
@@ -183,6 +184,18 @@ extension StatusPresentation {
                 symbolName: "checkmark.seal.fill",
                 tone: .success,
                 announcement: "Transfer fully verified. Safe to eject. Safe to eject does not mean safe to erase.")
+        case .verifiedNetworkOnly:
+            StatusPresentation(
+                state: state,
+                // Verified is verified: the bytes were read back off the server and matched, so
+                // the card really can come out. What separates this from `.verified` is where
+                // the copies ended up, which the user cannot see from a green checkmark and
+                // would otherwise only discover when the share is not mounted.
+                title: "Transfer verified on network storage — Safe to eject",
+                detail: "Every copy is on a server and was verified by reading it back from there. \(ejectionDetail)",
+                symbolName: "externaldrive.badge.checkmark",
+                tone: .success,
+                announcement: "Transfer fully verified on network storage. Safe to eject. Every copy is on a server, not on a disk attached to this Mac. Safe to eject does not mean safe to erase.")
         case .primaryVerifiedBackupIncomplete:
             StatusPresentation(
                 state: state,

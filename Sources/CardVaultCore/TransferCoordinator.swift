@@ -33,6 +33,19 @@ public struct TransferOutcome: Sendable {
     }
 
     public var requiresConflictResolution: Bool { !conflicts.isEmpty }
+
+    /// Whether every destination this run produced a result for is on network storage.
+    ///
+    /// The plan is consulted rather than the outcome because locality is a property of the
+    /// destination and the outcome deliberately carries only results. A verified run that
+    /// answers true is still verified and the card is still safe to eject — the bytes were read
+    /// back off the server to prove it — but nothing landed on a disk attached to this Mac, and
+    /// no count of verified files can show that.
+    public func isOnNetworkStorageOnly(given destinations: [DestinationPlan]) -> Bool {
+        guard !self.destinations.isEmpty else { return false }
+        let volumes = Dictionary(destinations.map { ($0.id, $0.volume) }, uniquingKeysWith: { first, _ in first })
+        return self.destinations.allSatisfy { volumes[$0.id]?.isLocal == false }
+    }
 }
 
 public actor TransferCoordinator {

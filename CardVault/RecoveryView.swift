@@ -278,11 +278,7 @@ private struct InspectionView: View {
             }
             Divider()
             HStack {
-                Button("Reveal Manifest") {
-                    if let url = inspection.manifestURLs.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    }
-                }
+                Button("Reveal Manifest") { model.revealManifest(for: inspection) }
                 Spacer()
                 Button("Done") { model.inspection = nil }.keyboardShortcut(.defaultAction)
             }.padding(16)
