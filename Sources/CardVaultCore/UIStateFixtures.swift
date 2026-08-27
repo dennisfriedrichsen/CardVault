@@ -258,13 +258,22 @@ extension UIStateFixture {
 
     private static let primaryURL = URL(filePath: "/Volumes/Field Archive/2026-08-26", directoryHint: .isDirectory)
     private static let backupURL = URL(filePath: "/Volumes/Backup Shuttle/2026-08-26", directoryHint: .isDirectory)
+    /// The staging shape, derived rather than spelled, so a fixture cannot
+    /// describe a tree the coordinator would not have written.
+    private static let layout = TransferLayout(transferID: transferID, transferName: "2026-08-26")
+    private static let primaryStagingURL = layout.stagingRoot(
+        in: URL(filePath: "/Volumes/Field Archive", directoryHint: .isDirectory))
+    private static let backupStagingURL = layout.stagingRoot(
+        in: URL(filePath: "/Volumes/Backup Shuttle", directoryHint: .isDirectory))
 
     static let verifiedOutcome = TransferOutcome(
         transferID: transferID, state: .verified,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: primaryURL),
+                                          failedFiles: 0, finalURL: primaryURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryURL)),
                        DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: backupURL)],
+                                          failedFiles: 0, finalURL: backupURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: backupURL))],
         safeToEject: true)
 
     /// A verified primary never masks a failed backup, so the fixture keeps both
@@ -272,27 +281,34 @@ extension UIStateFixture {
     static let partialOutcome = TransferOutcome(
         transferID: transferID, state: .partiallySuccessful,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: primaryURL),
+                                          failedFiles: 0, finalURL: primaryURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryURL)),
+                       // The backup did not finish, so its record is still the
+                       // one in staging.
                        DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 9,
-                                          failedFiles: 4, finalURL: nil)],
+                                          failedFiles: 4, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: backupStagingURL))],
         safeToEject: true)
 
     static let needsAttentionOutcome = TransferOutcome(
         transferID: transferID, state: .needsAttention,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 7,
-                                          failedFiles: 6, finalURL: nil)],
+                                          failedFiles: 6, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true)
 
     static let failedOutcome = TransferOutcome(
         transferID: transferID, state: .failed,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 0,
-                                          failedFiles: 13, finalURL: nil)],
+                                          failedFiles: 13, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true)
 
     static let conflictOutcome = TransferOutcome(
         transferID: transferID, state: .needsAttention,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 7,
-                                          failedFiles: 0, finalURL: nil)],
+                                          failedFiles: 0, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true,
         conflicts: [DestinationConflict(destinationID: primaryDestinationID, destinationLabel: "Primary",
                                         relativePath: "DCIM/100EOS_R/IMG_0435.CR3",

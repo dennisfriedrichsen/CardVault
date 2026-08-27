@@ -6,6 +6,11 @@ public struct DestinationOutcome: Sendable, Identifiable {
     public let verifiedFiles: Int
     public let failedFiles: Int
     public let finalURL: URL?
+    /// Where this destination's manifest is now: inside the finalised folder
+    /// when the destination finished, and still in staging when it did not. A
+    /// destination without a `finalURL` has a durable record all the same, and
+    /// history that cannot name it reports a connected drive as missing.
+    public let manifestURL: URL?
     public var isVerified: Bool { failedFiles == 0 }
 }
 
@@ -404,7 +409,7 @@ public actor TransferCoordinator {
             return DestinationOutcome(id: location.destination.id, label: location.destination.label,
                                       verifiedFiles: values.count { $0?.verification == .verified },
                                       failedFiles: values.count { $0?.verification != .verified },
-                                      finalURL: nil)
+                                      finalURL: nil, manifestURL: location.manifestURL)
         }
         // Resuming needs the card again, so this is not the moment to eject it.
         return TransferOutcome(transferID: manifest.transferID, state: .needsAttention,
@@ -550,42 +555,48 @@ public actor TransferCoordinator {
         let successes = destinationResults.count { $0.2 == 0 }
         noteTimestampShortfalls(&manifest, locations: locations)
         manifest.completedAt = now()
-        if successes == locations.count {
-            manifest.state = .verified
-            manifest.verifiedAt = now()
-        } else if successes > 0 {
-            manifest.state = .partiallySuccessful
-        } else {
-            manifest.state = .failed
-        }
+        let outcomeState: TransferState =
+            successes == locations.count ? .verified : (successes > 0 ? .partiallySuccessful : .failed)
+        manifest.state = outcomeState
+        if outcomeState == .verified { manifest.verifiedAt = now() }
         try await persist(manifest, locations: locations)
         beginPhase(.finalizing, totalFiles: manifest.files.count, totalBytes: workBytes(plan, passes: 1))
         await recordBytes(plan.totalBytes)
         await flushPhase(currentRelativePath: .some(nil))
         var outcomes: [DestinationOutcome] = []
+        var finalized: [Location] = []
         for (location, verified, failed) in destinationResults {
-            var finalURL: URL?
-            if failed == 0 {
-                try await fileSystem.move(location.stagingRoot, to: location.finalRoot)
-                finalURL = location.finalRoot
+            guard failed == 0 else {
+                // Nothing is moved, so this destination's record stays in
+                // staging — where it keeps `outcomeState`, and where recovery
+                // finds it at the next launch.
+                outcomes.append(.init(id: location.destination.id, label: location.destination.label,
+                                      verifiedFiles: verified, failedFiles: failed, finalURL: nil,
+                                      manifestURL: location.manifestURL))
+                continue
             }
+            try await fileSystem.move(location.stagingRoot, to: location.finalRoot)
+            let finalLocation = Location(
+                destination: location.destination, stagingRoot: location.finalRoot,
+                originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
+                manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
+                finalRoot: location.finalRoot,
+                creationDatesSupported: location.creationDatesSupported,
+                timestampTolerance: location.timestampTolerance)
+            finalized.append(finalLocation)
             outcomes.append(.init(id: location.destination.id, label: location.destination.label,
-                                  verifiedFiles: verified, failedFiles: failed, finalURL: finalURL))
+                                  verifiedFiles: verified, failedFiles: failed, finalURL: location.finalRoot,
+                                  manifestURL: finalLocation.manifestURL))
         }
-        // All source FileHandles are scoped and closed before this durable transition.
-        manifest.state = .safeToEject
-        let finalLocations = locations.map { location in
-            guard outcomes.first(where: { $0.id == location.destination.id })?.finalURL != nil else { return location }
-            return Location(destination: location.destination, stagingRoot: location.finalRoot,
-                            originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
-                            manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
-                            finalRoot: location.finalRoot,
-                            creationDatesSupported: location.creationDatesSupported,
-                            timestampTolerance: location.timestampTolerance)
-        }
-        try await persist(manifest, locations: finalLocations)
-        return TransferOutcome(transferID: plan.id,
-                               state: successes == locations.count ? .verified : (successes > 0 ? .partiallySuccessful : .failed),
+        // All source FileHandles are scoped and closed before this durable
+        // transition. `.safeToEject` describes the card and is recorded only
+        // where the transfer actually finished: writing it over a destination
+        // that still holds a staging tree would erase the one record saying
+        // that tree is unfinished, and recovery would never offer it again.
+        var ejectable = manifest
+        ejectable.state = .safeToEject
+        try await persist(ejectable, locations: finalized)
+        return TransferOutcome(transferID: plan.id, state: outcomeState,
                                destinations: outcomes, safeToEject: true)
     }
 }

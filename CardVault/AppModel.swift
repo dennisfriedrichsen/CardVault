@@ -624,12 +624,19 @@ final class AppModel {
         guard let outcome else { return }
         // Keyed by destination, so a manifest path is never recorded against
         // the wrong drive.
+        // A destination that did not finish still has a durable record, in its
+        // staging tree. Keying only off `finalURL` would leave history unable to
+        // name it, and a connected drive would be reported as not connected.
         let paths = outcome.destinations.reduce(into: [UUID: String]()) { paths, destination in
-            guard let url = destination.finalURL else { return }
-            paths[destination.id] = TransferLayout.manifestURL(inStaging: url).path
+            guard let url = destination.manifestURL else { return }
+            paths[destination.id] = url.path
         }
-        guard let first = paths.values.first,
-              let manifest = try? await ManifestStore().load(from: URL(filePath: first)) else { return }
+        // Read back from a destination that finished where there is one: its
+        // record is the furthest along, and the choice is not left to dictionary
+        // ordering.
+        guard let authority = outcome.destinations.first(where: { $0.finalURL != nil })?.manifestURL
+                ?? outcome.destinations.compactMap(\.manifestURL).first,
+              let manifest = try? await ManifestStore().load(from: authority) else { return }
         try? await historyStore.add(.init(manifest: manifest, manifestPaths: paths))
         history = await historyStore.all()
         await refreshHistoryDetail()
