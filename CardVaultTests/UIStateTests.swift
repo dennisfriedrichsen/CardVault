@@ -265,3 +265,62 @@ struct UIStateFixtureTests {
         #expect(ready.issues.isEmpty)
     }
 }
+
+@Suite("Preflight fixture provenance")
+struct PreflightFixtureTests {
+
+    /// The fixtures used to describe checks that did not exist: a source-exFAT
+    /// durability warning and a removable-backup warning, neither of which
+    /// `Preflight.swift` has ever emitted. They are now the real check's output,
+    /// and these assertions pin the situations each one poses so that a fixture
+    /// silently losing its issues fails here instead of in the next audit.
+    @Test("The ready fixture has nothing to report")
+    func readyFixtureIsClean() {
+        #expect(UIStateFixture.readyPreflight.issues.isEmpty)
+        #expect(UIStateFixture.readyPreflight.canProceed)
+        #expect(UIStateFixture.readyPreflight.destinations.count == 2)
+    }
+
+    @Test("The warning fixture warns, and only warns")
+    func warningFixtureWarns() {
+        let result = UIStateFixture.warningPreflight
+        #expect(result.canProceed)
+        #expect(result.issues.contains { $0.code == "same-device" && $0.severity == .warning })
+        #expect(!result.issues.isEmpty)
+    }
+
+    @Test("The blocked fixture blocks, and still shows the warning behind it")
+    func blockedFixtureBlocks() {
+        let result = UIStateFixture.blockedPreflight
+        #expect(!result.canProceed)
+        #expect(result.issues.contains { $0.code == "insufficient-space" && $0.severity == .blocking })
+        #expect(result.issues.contains { $0.code == "same-device" && $0.severity == .warning })
+    }
+
+    /// The check that would have caught the original drift, kept for the case
+    /// where someone reintroduces a hand-written fixture: every code a fixture
+    /// poses has to be one the service can actually produce.
+    @Test("Every code posed by a fixture is one preflight emits")
+    func fixtureCodesAreReal() {
+        let emitted = Set(emittedPreflightCodes())
+        for fixture in UIStateFixture.all {
+            for issue in fixture.preflight?.issues ?? [] {
+                #expect(emitted.contains(issue.code),
+                        "\(fixture.state) poses \(issue.code), which preflight never emits")
+            }
+        }
+    }
+
+    /// Read out of the source rather than listed by hand, so a code added to
+    /// `validate` needs no maintenance here and a code removed from it stops
+    /// vouching for a fixture immediately.
+    private func emittedPreflightCodes() -> [String] {
+        let url = URL(filePath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "Sources/CardVaultCore/Preflight.swift")
+        guard let source = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return source.components(separatedBy: "code: \"").dropFirst().compactMap { fragment in
+            fragment.firstIndex(of: "\"").map { String(fragment[fragment.startIndex..<$0]) }
+        }
+    }
+}

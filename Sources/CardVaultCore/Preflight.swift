@@ -25,22 +25,30 @@ public struct PreflightResult: Sendable {
 public struct TransferPreflightService: Sendable {
     public var safetyMarginBytes: Int64
     private let capacityProvider: @Sendable (URL) -> Int64?
+    private let readabilityProvider: @Sendable (URL) -> Bool
 
     public init(safetyMarginBytes: Int64 = 1_073_741_824) {
         self.safetyMarginBytes = safetyMarginBytes
         capacityProvider = Self.availableCapacity
+        readabilityProvider = Self.isReadable
     }
 
+    /// Both probes are injectable so that `validate` can be run as a pure
+    /// function of a plan. That is what lets the UI fixtures derive their
+    /// preflight results from the real check rather than hand-writing issues
+    /// that no code path produces.
     init(safetyMarginBytes: Int64 = 1_073_741_824,
-         capacityProvider: @escaping @Sendable (URL) -> Int64?) {
+         capacityProvider: @escaping @Sendable (URL) -> Int64?,
+         readabilityProvider: @escaping @Sendable (URL) -> Bool = Self.isReadable) {
         self.safetyMarginBytes = safetyMarginBytes
         self.capacityProvider = capacityProvider
+        self.readabilityProvider = readabilityProvider
     }
 
     public func validate(_ plan: TransferPlan) -> PreflightResult {
         var issues: [PreflightIssue] = []
         let source = URL(filePath: plan.sourceRootPath).standardizedFileURL
-        if !FileManager.default.isReadableFile(atPath: source.path) {
+        if !readabilityProvider(source) {
             issues.append(.init(code: "source-unreadable", severity: .blocking, message: "The source is unavailable or unreadable."))
         }
         if plan.destinations.isEmpty {
@@ -105,6 +113,10 @@ public struct TransferPreflightService: Sendable {
             component.rangeOfCharacter(from: forbidden) != nil
                 || component.hasSuffix(".") || component.hasSuffix(" ")
         }
+    }
+
+    static func isReadable(_ url: URL) -> Bool {
+        FileManager.default.isReadableFile(atPath: url.path)
     }
 
     private static func availableCapacity(at url: URL) -> Int64? {
