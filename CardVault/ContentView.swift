@@ -237,7 +237,18 @@ private struct ScanSummary: View {
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 7) {
                 GridRow { Text("Files"); Text(result.files.count, format: .number) }
                 GridRow { Text("Size"); Text(result.totalBytes, format: .byteCount(style: .file)) }
-                GridRow { Text("RAW/JPEG pairs"); Text(result.rawJPEGPairCount, format: .number) }
+                // What is on the card decides what is listed. A video card names
+                // videos; a JPEG-only card never mentions RAW.
+                ForEach(result.composition.groups) { group in
+                    GridRow {
+                        Text(group.category.title)
+                        Text("\(group.fileCount.formatted(.number)) · \(group.byteCount.formatted(.byteCount(style: .file)))")
+                            .accessibilityLabel("\(group.fileCount) \(group.category.title), \(group.byteCount.formatted(.byteCount(style: .file)))")
+                    }
+                }
+                if result.rawJPEGPairCount > 0 {
+                    GridRow { Text("RAW + JPEG pairs"); Text(result.rawJPEGPairCount, format: .number) }
+                }
                 GridRow { Text("Excluded"); Text(result.excludedFiles.count, format: .number) }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }

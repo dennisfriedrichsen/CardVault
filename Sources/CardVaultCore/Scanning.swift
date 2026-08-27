@@ -3,24 +3,33 @@ import UniformTypeIdentifiers
 
 public struct MediaClassifier: Sendable {
     private static let rawExtensions: Set<String> = [
-        "3fr", "arw", "cr2", "cr3", "dng", "erf", "fff", "iiq", "kdc", "mef",
+        "3fr", "arw", "cr2", "cr3", "dng", "erf", "fff", "gpr", "iiq", "kdc", "mef",
         "mos", "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "srw"
     ]
-    private static let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "avi", "mts", "m2ts", "mpg", "mpeg"]
-    private static let jpegExtensions: Set<String> = ["jpg", "jpeg", "jpe"]
+    private static let videoExtensions: Set<String> = [
+        "mov", "mp4", "m4v", "avi", "mts", "m2ts", "mpg", "mpeg",
+        "360", "insv", "mxf", "braw", "r3d"
+    ]
+    private static let jpegExtensions: Set<String> = ["jpg", "jpeg", "jpe", "insp"]
     private static let heifExtensions: Set<String> = ["heif", "heic", "hif"]
+    private static let audioExtensions: Set<String> = ["wav", "aif", "aiff", "caf", "mp3", "m4a", "aac", "flac"]
+    /// Files a camera writes beside a shot and cannot regenerate from it: edit
+    /// lists, per-clip metadata, and the proxies action cameras record next to
+    /// the full-resolution clip (GoPro `.lrv`/`.thm`).
+    private static let sidecarExtensions: Set<String> = ["xmp", "thm", "lrv", "xml", "aae"]
 
     public init() {}
 
     public func classify(_ url: URL) -> MediaKind {
         let ext = url.pathExtension.lowercased()
         if Self.rawExtensions.contains(ext) { return .raw }
-        if ext == "xmp" { return .sidecar }
+        if Self.sidecarExtensions.contains(ext) { return .sidecar }
         if Self.jpegExtensions.contains(ext) { return .jpeg }
         if Self.heifExtensions.contains(ext) { return .heif }
         if ext == "tif" || ext == "tiff" { return .tiff }
         if ext == "png" { return .png }
         if Self.videoExtensions.contains(ext) { return .video }
+        if Self.audioExtensions.contains(ext) { return .audio }
         if let type = UTType(filenameExtension: ext) {
             if type.conforms(to: .jpeg) { return .jpeg }
             if type.conforms(to: .heic) || type.conforms(to: .heif) { return .heif }
@@ -28,16 +37,51 @@ public struct MediaClassifier: Sendable {
             if type.conforms(to: .png) { return .png }
             if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
             if type.conforms(to: .rawImage) { return .raw }
+            if type.conforms(to: .audio) { return .audio }
         }
         return .other
+    }
+}
+
+/// What the card actually holds, by category. Reported instead of a stills-only
+/// statistic so a video card, a JPEG-only card, and a mixed card each describe
+/// themselves. Only categories present on the card appear.
+public struct MediaComposition: Sendable, Equatable {
+    public struct Group: Sendable, Equatable, Identifiable {
+        public let category: MediaCategory
+        public let fileCount: Int
+        public let byteCount: Int64
+        public var id: MediaCategory { category }
+    }
+
+    public let groups: [Group]
+
+    public init(files: [SourceFile]) {
+        var counts: [MediaCategory: (Int, Int64)] = [:]
+        for file in files {
+            let existing = counts[file.mediaKind.category] ?? (0, 0)
+            counts[file.mediaKind.category] = (existing.0 + 1, existing.1 + file.byteCount)
+        }
+        groups = MediaCategory.allCases.compactMap { category in
+            guard let tally = counts[category] else { return nil }
+            return Group(category: category, fileCount: tally.0, byteCount: tally.1)
+        }
+    }
+
+    public func fileCount(of category: MediaCategory) -> Int {
+        groups.first { $0.category == category }?.fileCount ?? 0
     }
 }
 
 public struct ScanResult: Sendable {
     public var files: [SourceFile]
     public var excludedFiles: [SourceFile]
+    /// Kept because a card where every frame exists twice is worth flagging
+    /// before a transfer, but it is one detail about one workflow, not the
+    /// summary: it is reported only when the card actually holds such pairs.
     public var rawJPEGPairCount: Int
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
+    public var composition: MediaComposition { MediaComposition(files: files) }
 }
 
 public enum SourceScanError: Error, Equatable, Sendable, LocalizedError {
