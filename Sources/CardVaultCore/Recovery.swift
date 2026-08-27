@@ -473,13 +473,25 @@ public actor RecoveryCoordinator {
                 remaining.remove(at: index)
             }
         }
-        for plan in manifest.destinations where assigned[plan.id] == nil && accesses[plan.id] == nil {
-            if let index = remaining.firstIndex(where: {
-                match(recorded: plan.volume, at: $0.root) == .matched
-            }) {
-                assigned[plan.id] = (remaining[index].root, remaining[index].staging)
-                remaining.remove(at: index)
+        // Volume identity cannot separate two folders on one drive: both
+        // destinations record the same identity, so a tree that matches one
+        // matches the other. Binding either would be a guess, and a wrong guess
+        // resumes a destination into another destination's tree. Assign only
+        // where the pairing is the single possible one in both directions.
+        let ambiguous = manifest.destinations.filter { assigned[$0.id] == nil && accesses[$0.id] == nil }
+        for plan in ambiguous {
+            let candidates = remaining.indices.filter {
+                match(recorded: plan.volume, at: remaining[$0].root) == .matched
             }
+            guard candidates.count == 1 else { continue }
+            let index = candidates[0]
+            let rivals = ambiguous.filter {
+                $0.id != plan.id && assigned[$0.id] == nil
+                    && match(recorded: $0.volume, at: remaining[index].root) == .matched
+            }
+            guard rivals.isEmpty else { continue }
+            assigned[plan.id] = (remaining[index].root, remaining[index].staging)
+            remaining.remove(at: index)
         }
         // A single destination and a single discovered tree can only be each
         // other, even when the volume cannot identify itself.
