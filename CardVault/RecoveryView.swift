@@ -86,7 +86,18 @@ struct RecoveryView: View {
             lines.append("Nothing will be removed.")
         } else {
             let count = plan.removableIncompleteArtifacts.count
-            lines.append("\(count) partially written file\(count == 1 ? "" : "s") can be removed. Nothing else is touched.")
+            lines.append("\(count) partially written file\(count == 1 ? "" : "s") can be removed. Nothing else is touched:")
+            // Named, not counted. A count cannot be checked against the drive;
+            // a path can, and the plan promises the user can see what goes.
+            let shown = 8
+            lines.append(contentsOf: plan.removableDescriptions.prefix(shown).map { "  \($0)" })
+            if plan.removableDescriptions.count > shown {
+                lines.append("  and \(plan.removableDescriptions.count - shown) more")
+            }
+        }
+        if !plan.refusedPaths.isEmpty {
+            lines.append("\(plan.refusedPaths.count) record\(plan.refusedPaths.count == 1 ? "" : "s") "
+                + "name a path outside this transfer's folder and will be left alone.")
         }
         lines.append("The transfer record is kept so you can still inspect it.")
         return lines.joined(separator: "\n")

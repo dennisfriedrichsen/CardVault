@@ -66,6 +66,10 @@ public struct TransferManifest: Codable, Sendable {
 
 public enum ManifestError: Error, Equatable, Sendable {
     case unsupportedSchema(Int)
+    /// A version this build never wrote, so the document cannot be read as v1.
+    case invalidSchema(Int)
+    /// A path in the record could reach outside the transfer's own tree.
+    case unsafePath(String)
     case noValidManifest
 }
 
@@ -119,6 +123,29 @@ public actor ManifestStore {
         guard manifest.schemaVersion <= TransferManifest.currentSchemaVersion else {
             throw ManifestError.unsupportedSchema(manifest.schemaVersion)
         }
+        // Bounded below as well: a zero or negative version is not v1 written by
+        // an older build, it is a document this build has no reason to trust.
+        guard manifest.schemaVersion >= 1 else { throw ManifestError.invalidSchema(manifest.schemaVersion) }
+        try Self.validatePaths(in: manifest)
         return manifest
+    }
+
+    /// The manifest lives on removable media and is writable by anything with
+    /// access to the drive, while the paths in it are joined onto a destination
+    /// root and then deleted and written. They are checked once, here, so that
+    /// no caller can be the one that forgot — and a record that fails is
+    /// reported as unreadable rather than acted on.
+    static func validatePaths(in manifest: TransferManifest) throws {
+        for file in manifest.files {
+            try validate(path: file.relativeSourcePath)
+            try validate(path: file.relativeDestinationPath)
+        }
+    }
+
+    private static func validate(path: String) throws {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"),
+              !path.split(separator: "/", omittingEmptySubsequences: true).contains("..") else {
+            throw ManifestError.unsafePath(path)
+        }
     }
 }

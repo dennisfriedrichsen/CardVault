@@ -118,6 +118,142 @@ struct RecoveryTests {
         }
     }
 
+    // MARK: - Untrusted manifest paths
+
+    /// The manifest is a document on removable media. A path in it that walks
+    /// out of the transfer's own tree makes recovery delete and overwrite a file
+    /// that has nothing to do with CardVault, so such a record is reported
+    /// rather than acted on.
+    @Test("A manifest naming a path outside the transfer is reported, not acted on")
+    func manifestWithEscapingPathIsUnreadable() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].relativeDestinationPath = "../../../earlier-import.jpg"
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            let scan = await fixture.coordinator().scan(destinationRoots: fixture.destinationRoots)
+            #expect(scan.transfers.isEmpty)
+            #expect(scan.unreadable.count == 1)
+            #expect(scan.unreadable[0].reason.contains("outside"))
+            // Not a "newer CardVault" problem, so it must not tell the user to update.
+            #expect(!scan.unreadable[0].isUnsupportedSchema)
+        }
+    }
+
+    @Test("Resume refuses a tampered manifest instead of overwriting outside the tree")
+    func resumeRefusesEscapingPath() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let victim = fixture.root.appending(path: "earlier-import.jpg")
+            let victimBytes = Data(repeating: 0xEE, count: 4_096)
+            try victimBytes.write(to: victim)
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].relativeDestinationPath = "../../../earlier-import.jpg"
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            await #expect(throws: (any Error).self) {
+                try await TransferCoordinator().resume(plan: fixture.plan,
+                                                       manifestURL: try fixture.stagingManifestURL())
+            }
+            #expect(FileManager.default.fileExists(atPath: victim.path), "an unrelated file was removed")
+            #expect(try Data(contentsOf: victim) == victimBytes, "an unrelated file was overwritten")
+        }
+    }
+
+    /// Decoding is not the only guard: a path is checked again where it becomes
+    /// a file operation, so no future caller can be the one that forgot.
+    @Test("A destination path leading out of the tree is refused rather than written")
+    func copyRefusesEscapingDestinationPath() async throws {
+        try await withFixture(fileCount: 1) { fixture in
+            let victim = fixture.root.appending(path: "victim.jpg")
+            let victimBytes = Data(repeating: 0xAB, count: 512)
+            try victimBytes.write(to: victim)
+            let plan = TransferPlan(name: "Escaping", mode: .preserveCard, sourceRootPath: fixture.source.path,
+                                    sourceVolume: fixture.plan.sourceVolume,
+                                    files: [SourceFile(relativePath: "../victim.jpg", byteCount: 512,
+                                                       mediaKind: .jpeg)],
+                                    destinations: fixture.plan.destinations)
+
+            let outcome = try await TransferCoordinator().execute(plan: plan)
+            #expect(!outcome.destinations[0].isVerified)
+            #expect(try Data(contentsOf: victim) == victimBytes)
+        }
+    }
+
+    @Test("Abandon removes nothing outside the staging tree")
+    func abandonRefusesEscapingPath() async throws {
+        try await withFixture(fileCount: 1) { fixture in
+            let victim = fixture.root.appending(path: "irreplaceable.jpg")
+            try Data(repeating: 0xAB, count: 1_024).write(to: victim)
+            let destinationID = fixture.plan.destinations[0].id
+            // Built in memory, so the point-of-use guard is what is under test
+            // rather than the check on decode.
+            var manifest = TransferManifest(plan: fixture.plan)
+            manifest.state = .copying
+            manifest.files[0].relativeDestinationPath = "../../../irreplaceable.jpg"
+            manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            let staging = fixture.stagingRoot()
+            let transfer = RecoverableTransfer(
+                manifest: manifest,
+                source: RecoveredSource(recordedVolume: manifest.source, root: fixture.source,
+                                        match: .matched, bookmarkWasStale: false),
+                destinations: [RecoveredDestination(
+                    id: destinationID, label: "Primary", recordedVolume: fixture.plan.destinations[0].volume,
+                    root: fixture.destinationRoots[0], stagingRoot: staging,
+                    manifestURL: TransferLayout.manifestURL(inStaging: staging),
+                    match: .matched, bookmarkWasStale: false,
+                    copiedFiles: 0, verifiedFiles: 0, conflictedFiles: 0)])
+
+            let coordinator = fixture.coordinator()
+            let plan = coordinator.abandonPlan(for: transfer)
+            for url in plan.removableIncompleteArtifacts {
+                #expect(url.standardizedFileURL.path.hasPrefix(staging.standardizedFileURL.path + "/"))
+            }
+            #expect(plan.removableIncompleteArtifacts.isEmpty)
+            #expect(plan.refusedPaths.count == 1)
+
+            _ = await coordinator.abandon(transfer, removingIncompleteArtifacts: true)
+            #expect(FileManager.default.fileExists(atPath: victim.path),
+                    "a file outside the transfer was deleted")
+        }
+    }
+
+    /// The abandon dialog promises the user can see what it will remove, so the
+    /// plan carries the paths and not only how many there are.
+    @Test("The abandon plan names the files it would remove")
+    func abandonPlanNamesItsRemovals() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[1].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            try fixture.placePartialFile("second.CR3")
+            let coordinator = fixture.coordinator()
+            let transfer = try #require(await coordinator
+                .scan(destinationRoots: fixture.destinationRoots).transfers.first)
+            let plan = coordinator.abandonPlan(for: transfer)
+            #expect(plan.removableDescriptions.count == plan.removableIncompleteArtifacts.count)
+            #expect(plan.removableDescriptions.contains { $0.contains("DCIM/second.CR3") && $0.contains("Primary") })
+            #expect(plan.refusedPaths.isEmpty)
+        }
+    }
+
+    /// A manifest that says nothing about a destination says nothing good about
+    /// it either: the file has not been verified there.
+    @Test("A file with no record for a destination is not counted as verified")
+    func missingDestinationRecordIsNotASuccess() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, _ in
+                manifest.files[0].destinations = [:]
+            }
+            let outcome = try await fixture.resume()
+            #expect(outcome.state == .failed)
+            #expect(!outcome.destinations[0].isVerified)
+            #expect(outcome.destinations[0].verifiedFiles == 1)
+            #expect(outcome.destinations[0].failedFiles == 1)
+            // Nothing was finalized, so the transfer is still recoverable.
+            #expect(FileManager.default.fileExists(atPath: fixture.stagingRoot().path))
+        }
+    }
+
     // MARK: - Volume identity
 
     @Test("A card reinserted at a different mount path is still the same card")
