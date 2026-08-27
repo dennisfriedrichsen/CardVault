@@ -234,12 +234,12 @@ struct RecoveryTests {
                     DestinationFileResult(copyState: .copied, verification: .pending)
             }
             try fixture.placeCopiedFile("first.CR3")
-            let before = try fixture.identity(ofStagedFile: "first.CR3")
+            let before = try fixture.inode(ofStagedFile: "first.CR3")
 
             let outcome = try await fixture.resume()
             #expect(outcome.state == .verified)
-            // Same inode and same creation date: the bytes were reread, not rewritten.
-            #expect(try fixture.identity(ofStagedFile: "first.CR3") == before)
+            // Same inode: the bytes were reread, not rewritten.
+            #expect(try fixture.inode(ofStagedFile: "first.CR3") == before)
 
             let manifest = try await fixture.finalManifest()
             let result = try #require(manifest.files[0].destinations[fixture.plan.destinations[0].id])
@@ -261,14 +261,14 @@ struct RecoveryTests {
             }
             try fixture.placeCopiedFile("first.CR3")
             try fixture.placePartialFile("second.CR3")
-            let verifiedBefore = try fixture.identity(ofStagedFile: "first.CR3")
+            let verifiedBefore = try fixture.inode(ofStagedFile: "first.CR3")
             let partialBefore = try fixture.identity(ofStagedFile: "second.CR3")
 
             let outcome = try await fixture.resume()
             #expect(outcome.state == .verified)
             #expect(outcome.destinations[0].verifiedFiles == 2)
             // The verified file was never rewritten.
-            #expect(try fixture.identity(ofStagedFile: "first.CR3") == verifiedBefore)
+            #expect(try fixture.inode(ofStagedFile: "first.CR3") == verifiedBefore)
             // The partial one was replaced and now holds the whole source.
             #expect(try fixture.identity(ofStagedFile: "second.CR3") != partialBefore)
             #expect(try fixture.stagedContents("second.CR3") == fixture.contents("second.CR3"))
@@ -515,6 +515,14 @@ private struct RecoveryFixture {
         let url = source.appending(path: "DCIM/\(name)")
         let size = try Data(contentsOf: url).count
         return try await LocalFileSystem().checksum(url, expectedSize: Int64(size))
+    }
+
+    /// The one attribute that proves a file was not rewritten. Dates are no
+    /// longer usable for that: a resumed transfer deliberately reapplies the
+    /// source's dates to files an earlier run copied.
+    func inode(ofStagedFile name: String, index: Int = 0) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: stagedURL(name, index: index).path)
+        return attributes[.systemFileNumber] as? Int ?? -1
     }
 
     func identity(ofStagedFile name: String, index: Int = 0) throws -> FileIdentity {

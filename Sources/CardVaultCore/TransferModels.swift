@@ -208,14 +208,21 @@ public struct DestinationFileResult: Codable, Hashable, Sendable {
     /// How an existing file at this destination path was classified, when one
     /// was found. Recorded durably so a skip or a pause stays auditable.
     public var conflict: ConflictClassification?
+    /// What became of the source's dates on this copy. Absent in manifests
+    /// written before timestamps were carried over, so `schemaVersion` stays 1.
+    /// Kept separate from `verification` because a date is not content: this
+    /// never changes whether the copy is verified.
+    public var timestamps: TimestampOutcome?
 
     public init(copyState: CopyState = .pending, verification: VerificationResult = .pending,
                 destinationChecksum: String? = nil, error: String? = nil,
-                conflict: ConflictClassification? = nil) {
+                conflict: ConflictClassification? = nil,
+                timestamps: TimestampOutcome? = nil) {
         self.copyState = copyState
         self.verification = verification
         self.destinationChecksum = destinationChecksum
         self.error = error
         self.conflict = conflict
+        self.timestamps = timestamps
     }
 }

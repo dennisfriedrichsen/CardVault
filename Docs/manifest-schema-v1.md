@@ -31,6 +31,34 @@ Only source checksums are compared across manifests, because they do not depend 
 landed in. A record from another manifest is consulted only if that manifest's `schemaVersion` is one
 this build supports, and it still has to agree with a fresh read of the bytes on disk.
 
+## Source timestamps on destination copies
+
+A destination result may additionally carry a `timestamps` value recording what became of the
+source's dates on that copy: `creationDate` and `modificationDate`, each one of `pending`, `applied`,
+`unrecorded`, `unsupported`, or `failed`, plus an `error` string when something was refused. The
+field is additive and absent in manifests written before it existed, so `schemaVersion` remains 1.
+
+The modification date is the one every other tool sorts by, and it can be written on every
+destination format CardVault supports, including NFS. The creation date is best effort: whether the
+destination stores one at all is measured once per destination, by writing a birth time to a probe
+file and reading it back, so a mount that keeps no birth times records `unsupported` rather than
+producing one notice per file. `unrecorded` means the source never carried that date.
+
+Dates are metadata, not content, and are held to a weaker promise than the bytes. Applying them never
+changes `verification`, never removes or rewrites a copy, and never fails a transfer: a file whose
+SHA-256 matches the source is verified whether or not its dates could be written. A `failed` date is
+summarised as one `warnings` entry per destination, counting the files affected. A read-back is
+compared within the destination file system's own granularity, which is two seconds on FAT-family
+volumes, so their expected truncation is not reported as a shortfall.
+
+Timestamps are reapplied on resume for files an earlier run copied, because the manifest holds the
+source dates regardless of which run wrote the file; without that, an interrupted transfer would
+produce an archive where a file's date depended on which run copied it. Directory dates are out of
+scope: they are not scanned, not recorded, and a destination directory carries its copy time.
+
+Writing dates to a destination copy is not a source modification. The source is still never written
+to, renamed, reorganised, or annotated.
+
 ## Relaunch recovery
 
 An unfinished transfer is discovered by its staging directory, named

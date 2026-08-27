@@ -70,6 +70,7 @@ above the store: no error handling runs, nothing is tidied up, the record simply
 | Failure immediately before finalization | `failureBeforeFinalization` |
 | Failure immediately after finalization | `failureAfterFinalization` |
 | Primary and backup failures, in either order | `primaryCopyThenBackupVerificationFailure`, `backupCopyThenPrimaryVerificationFailure` |
+| Destination attribute write refused after a good copy | `failedTimestampNeverFailsTheCopy` (in `TimestampTests.swift`) |
 
 ## Notes on two of the harder cases
 
@@ -82,6 +83,12 @@ fraction outside `0...1`.
 byte boundary with an interposed rendezvous, cancels there, and then releases it. The file in flight
 must leave nothing half-written behind, the record must say `cancelled`, and resuming must finish the
 transfer verified.
+
+**A refused attribute write.** Carrying the source's dates onto a destination copy goes through the
+same actor as every other operation, so a `.attributes` fault scoped to the staging path reproduces a
+destination that takes the bytes and refuses the dates. The requirement is the inverse of the others:
+nothing may be undone. The copy stays, it stays verified, the transfer still reaches `verified`, and
+the shortfall is recorded per file and summarised as one warning per destination.
 
 **Failure after finalization.** Finalisation renames the staging tree to its final name. If the
 update that follows the rename cannot land, the error path must not recreate the staging directory it
