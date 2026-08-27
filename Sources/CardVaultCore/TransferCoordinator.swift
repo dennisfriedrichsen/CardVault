@@ -56,8 +56,7 @@ public actor TransferCoordinator {
 
     public func execute(plan: TransferPlan, progress: ProgressHandler? = nil) async throws -> TransferOutcome {
         var manifest = TransferManifest(plan: plan, now: now())
-        let locations = destinationLocations(plan)
-        try await prepare(locations: locations)
+        let locations = try await prepare(locations: destinationLocations(plan))
         manifest.startedAt = now()
         return try await run(plan: plan, manifest: &manifest, locations: locations, progress: progress)
     }
@@ -66,8 +65,7 @@ public actor TransferCoordinator {
                        progress: ProgressHandler? = nil) async throws -> TransferOutcome {
         var manifest = try await manifestStore.load(from: manifestURL)
         guard manifest.transferID == plan.id else { throw ManifestError.noValidManifest }
-        let locations = destinationLocations(plan)
-        try await prepare(locations: locations)
+        let locations = try await prepare(locations: destinationLocations(plan))
         return try await run(plan: plan, manifest: &manifest, locations: locations, progress: progress)
     }
 
@@ -110,6 +108,13 @@ public actor TransferCoordinator {
         let originalsRoot: URL
         let manifestURL: URL
         let finalRoot: URL
+        /// Measured once, in `prepare`, rather than inferred from the volume
+        /// kind: a mount that stores no birth time has to be recognised before
+        /// the first file, or every file reports the same shortfall.
+        var creationDatesSupported: Bool = false
+        /// Slack allowed when a written date is read back, from the destination
+        /// file system's own granularity.
+        var timestampTolerance: TimeInterval = TimestampTolerance.exact
     }
 
     private func destinationLocations(_ plan: TransferPlan) -> [Location] {
@@ -120,15 +125,20 @@ public actor TransferCoordinator {
             return Location(destination: destination, stagingRoot: staging,
                             originalsRoot: TransferLayout.originalsRoot(inStaging: staging),
                             manifestURL: TransferLayout.manifestURL(inStaging: staging),
-                            finalRoot: layout.finalRoot(in: parent))
+                            finalRoot: layout.finalRoot(in: parent),
+                            timestampTolerance: TimestampTolerance.forFileSystem(destination.volume.fileSystem))
         }
     }
 
-    private func prepare(locations: [Location]) async throws {
-        for location in locations {
+    private func prepare(locations: [Location]) async throws -> [Location] {
+        var prepared: [Location] = []
+        for var location in locations {
             if await fileSystem.exists(location.finalRoot) { throw FileSystemError.existingConflict(location.finalRoot.path) }
             try await fileSystem.createDirectory(location.originalsRoot)
+            location.creationDatesSupported = await fileSystem.supportsCreationDates(in: location.originalsRoot)
+            prepared.append(location)
         }
+        return prepared
     }
 
     private func persist(_ manifest: TransferManifest, locations: [Location]) async throws {
@@ -224,6 +234,12 @@ public actor TransferCoordinator {
             for location in locations {
                 let result = manifest.files[index].destinations[location.destination.id]
                 guard result?.copyState != .copied && result?.verification != .verified else {
+                    // A file an earlier run copied still needs its dates, or the
+                    // archive ends up recording which run copied each file.
+                    if result?.timestamps?.needsApplication ?? true {
+                        await applyTimestamps(&manifest, fileIndex: index, location: location)
+                        try await persist(manifest, locations: locations)
+                    }
                     // Resumed work still counts toward the phase so the bar stays honest.
                     await recordBytes(file.byteCount)
                     continue
@@ -248,6 +264,9 @@ public actor TransferCoordinator {
                             assessment.existingChecksum
                         manifest.files[index].destinations[location.destination.id]?.verification = .verified
                         manifest.files[index].destinations[location.destination.id]?.error = nil
+                        // A satisfied file is part of this archive, so it carries
+                        // the same dates as everything copied beside it.
+                        await applyTimestamps(&manifest, fileIndex: index, location: location)
                         try await persist(manifest, locations: locations)
                         await recordBytes(file.byteCount)
                         continue
@@ -277,6 +296,7 @@ public actor TransferCoordinator {
                     try await fileSystem.copyExclusive(from: source, to: destination,
                                                        expectedSize: file.byteCount, onBytes: onBytes)
                     manifest.files[index].destinations[location.destination.id]?.copyState = .copied
+                    await applyTimestamps(&manifest, fileIndex: index, location: location)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -290,6 +310,42 @@ public actor TransferCoordinator {
         // A complete copy phase is not a successful transfer; verification follows.
         await flushPhase(currentRelativePath: .some(nil))
         return conflicts
+    }
+
+    // MARK: - Timestamps
+
+    /// Carries the source's dates onto a destination copy CardVault stands
+    /// behind. Deliberately non-throwing: the bytes are the product, and a date
+    /// that would not write is a metadata shortfall, never a reason to fail a
+    /// copy whose digest matched. Writing to the destination is not a breach of
+    /// the never-touch-the-source rule — the source is still never written to.
+    private func applyTimestamps(_ manifest: inout TransferManifest, fileIndex: Int, location: Location) async {
+        let file = manifest.files[fileIndex]
+        let url = location.originalsRoot.appending(path: file.relativeDestinationPath)
+        let outcome: TimestampOutcome
+        do {
+            outcome = try await fileSystem.applyTimestamps(
+                to: url, creationDate: file.creationDate, modificationDate: file.modificationDate,
+                creationDatesSupported: location.creationDatesSupported,
+                tolerance: location.timestampTolerance)
+        } catch {
+            outcome = TimestampOutcome(creationDate: .failed, modificationDate: .failed,
+                                       error: String(describing: error))
+        }
+        manifest.files[fileIndex].destinations[location.destination.id]?.timestamps = outcome
+    }
+
+    /// One line per destination rather than one per file. A destination that
+    /// stores no creation dates at all is silent by design; only a date that was
+    /// expected to stick and did not is worth telling the user about.
+    private func noteTimestampShortfalls(_ manifest: inout TransferManifest, locations: [Location]) {
+        for location in locations {
+            let failed = manifest.files.count { $0.destinations[location.destination.id]?.timestamps?.hasFailure == true }
+            guard failed > 0 else { continue }
+            manifest.warnings.append(
+                "\(location.destination.label): \(failed) verified \(failed == 1 ? "file" : "files") kept the copy date "
+                + "instead of the original date. The copies themselves are complete and verified.")
+        }
     }
 
     /// Stops before verification with everything already written left intact and
@@ -430,6 +486,7 @@ public actor TransferCoordinator {
             return (location, values.count { $0.verification == .verified }, values.count { $0.verification != .verified })
         }
         let successes = destinationResults.count { $0.2 == 0 }
+        noteTimestampShortfalls(&manifest, locations: locations)
         manifest.completedAt = now()
         if successes == locations.count {
             manifest.state = .verified
@@ -460,7 +517,9 @@ public actor TransferCoordinator {
             return Location(destination: location.destination, stagingRoot: location.finalRoot,
                             originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
                             manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
-                            finalRoot: location.finalRoot)
+                            finalRoot: location.finalRoot,
+                            creationDatesSupported: location.creationDatesSupported,
+                            timestampTolerance: location.timestampTolerance)
         }
         try await persist(manifest, locations: finalLocations)
         return TransferOutcome(transferID: plan.id,

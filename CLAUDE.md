@@ -39,10 +39,12 @@ target is macOS 26.
 
 CardVault ingests, verifies, recovers, records, and safely ejects. It never deletes, renames,
 reorganizes, or writes metadata to a source, never erases or formats media, and never says a card is
-safe to erase — only that it is safe to eject. Browsing, culling, ratings, and analytics belong to
-SDelight, a separate app CardVault can optionally hand a verified destination to
-(`ExternalHandoff.swift`). Reject work that crosses this line rather than implementing it.
-`Docs/prompt.txt` is the originating specification.
+safe to erase — only that it is safe to eject. Writing metadata to a *destination* copy CardVault
+itself created — carrying the source's dates onto it — is on the right side of that line; the source
+is still never written to. Browsing, culling, ratings, and analytics belong to SDelight, a separate
+app CardVault can optionally hand a verified destination to (`ExternalHandoff.swift`). Reject work
+that crosses this line rather than implementing it. `Docs/prompt.txt` is the originating
+specification.
 
 ## Architecture
 
@@ -72,6 +74,10 @@ Load-bearing pieces and why they exist:
   destination by display name or mount path alone.
 - **`Conflicts.swift`** — classifies existing destination content. Existing final or unrelated files are
   never overwritten; a conflict pauses the transfer before verification and waits for a decision.
+- **`Timestamps.swift`** — carrying the source's dates onto destination copies. Dates are metadata,
+  held to a weaker promise than bytes: applied best effort, recorded per file in the manifest, and
+  never allowed to fail a copy whose digest matched. Creation-date support is measured once per
+  destination, because a mount that stores none would otherwise report the same fact per file.
 - **`ProgressAggregation.swift`** — precise counters live on the coordinator; only throttled snapshots
   reach handlers. Copy and verification progress stay separate so a finished copy can never render as a
   finished transfer.
