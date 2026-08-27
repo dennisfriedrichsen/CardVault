@@ -49,6 +49,27 @@ public struct TransferLayout: Sendable, Hashable {
         staging.appending(path: manifestRelativePath)
     }
 
+    /// Joins a relative path from a manifest onto a root, and hands it back only
+    /// when the result stays inside that root.
+    ///
+    /// The manifest is a document on removable media: anything with access to
+    /// the drive can write it, and the paths in it are deleted from and written
+    /// to. `URL.appending(path:)` does not resolve `..`, and the file system
+    /// resolves it at syscall time, so a component that walks out of the tree
+    /// survives all the way to the operation unless it is checked here.
+    public static func containedURL(relativePath: String, under root: URL) -> URL? {
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/"),
+              !relativePath.contains("\0") else { return nil }
+        let base = root.standardizedFileURL
+        let candidate = root.appending(path: relativePath).standardizedFileURL
+        guard candidate.path.hasPrefix(base.path + "/") else { return nil }
+        // Symlinks are resolved on both sides identically, so a link planted in
+        // the staging tree cannot point the copy out of it either.
+        guard candidate.resolvingSymlinksInPath().path
+            .hasPrefix(base.resolvingSymlinksInPath().path + "/") else { return nil }
+        return candidate
+    }
+
     /// Recovers the transfer UUID from a staging directory name, so a scan can
     /// tell a CardVault artifact from any other dot-directory before it reads
     /// anything. Returns nil for names this build did not write.

@@ -78,10 +78,17 @@ a drive that was lost.
 describes stay on disk; the marker only stops recovery from offering the transfer again. It is
 additive, so `schemaVersion` remains 1. Abandoning never removes a source file, a verified file, a
 file awaiting a conflict decision, or anything CardVault did not write; only artifacts this manifest
-recorded as `copying` or `failed` may be removed, and only when the user asks for that explicitly.
+recorded as `copying` or `failed` may be removed, and only when the user asks for that explicitly —
+and only where the path it names resolves inside that transfer's own staging tree.
 
 A manifest this build cannot decode, and one whose `schemaVersion` is newer than this build supports,
-are both reported to the user and never restarted.
+are both reported to the user and never restarted. So is one whose `schemaVersion` is below 1, and one
+carrying a `relativeSourcePath` or `relativeDestinationPath` that is empty, absolute, holds a NUL, or
+contains a `..` component. The manifest lives on removable media and is writable by anything with
+access to the drive, while the paths in it are joined onto a destination root and then deleted from
+and written to; a path that could leave the transfer's own tree makes the record untrustworthy as a
+whole, so it is reported rather than acted on. Every site that turns one of those paths into a file
+operation checks containment again, so the guarantee does not rest on decoding alone.
 
 Updates are written to a sibling temporary file, then replace the current manifest. The preceding
 valid manifest is retained as `transfer-manifest.json.previous` for recovery from a damaged update.

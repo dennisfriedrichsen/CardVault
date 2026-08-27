@@ -449,6 +449,56 @@ struct CoreTests {
         }
     }
 
+    /// The manifest is the one document CardVault reads back that it did not
+    /// necessarily write: it sits on removable media, and every path in it is
+    /// joined onto a destination root before files are deleted and written.
+    @Test("A manifest whose paths could leave the transfer tree is rejected on decode")
+    func manifestPathsAreValidatedOnDecode() async throws {
+        try await withTemporaryDirectory { root in
+            let plan = makePlan(source: root, destinations: [root], files: [
+                SourceFile(relativePath: "DCIM/photo.CR3", byteCount: 1, mediaKind: .raw)
+            ])
+            let store = ManifestStore()
+            for path in ["../../../elsewhere.jpg", "DCIM/../../elsewhere.jpg", "/etc/hosts", "",
+                         "DCIM/pho\u{0}to.CR3"] {
+                var manifest = TransferManifest(plan: plan)
+                manifest.files[0].relativeDestinationPath = path
+                let url = root.appending(path: "\(UUID().uuidString).json")
+                try await store.save(manifest, to: url)
+                await #expect(throws: ManifestError.unsafePath(path), "\(path) was accepted") {
+                    try await store.load(from: url)
+                }
+            }
+            // The source path is checked on the same footing: it is the other
+            // half of the record and no more trustworthy.
+            var manifest = TransferManifest(plan: plan)
+            manifest.files[0].relativeSourcePath = "../../secrets.CR3"
+            let url = root.appending(path: "source.json")
+            try await store.save(manifest, to: url)
+            await #expect(throws: ManifestError.unsafePath("../../secrets.CR3")) {
+                try await store.load(from: url)
+            }
+        }
+    }
+
+    /// Bounded above only, a zero or negative version decoded as if it were v1.
+    @Test("A schema version this build never wrote is rejected")
+    func manifestSchemaVersionIsBoundedBelow() async throws {
+        try await withTemporaryDirectory { root in
+            let plan = makePlan(source: root, destinations: [root], files: [])
+            let store = ManifestStore()
+            for version in [0, -1] {
+                var manifest = TransferManifest(plan: plan)
+                manifest.schemaVersion = version
+                let url = root.appending(path: "v\(version).json")
+                try await store.save(manifest, to: url)
+                await #expect(throws: ManifestError.invalidSchema(version)) {
+                    try await store.load(from: url)
+                }
+            }
+        }
+    }
+
     @Test("Existing final destination is never overwritten")
     func existingConflict() async throws {
         try await withTransferFixture(destinationCount: 1) { plan, roots in

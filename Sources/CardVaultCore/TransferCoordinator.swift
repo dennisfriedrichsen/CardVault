@@ -204,6 +204,13 @@ public actor TransferCoordinator {
         { [weak self] delta in await self?.recordBytes(delta) }
     }
 
+    /// One wording for every site that refuses a path, so the record reads the
+    /// same whether the copy, the dates, or the verification stopped on it.
+    private static func escapingPathError(_ relativePath: String) -> String {
+        "The transfer record names \(relativePath) as a destination path outside this transfer's folder. "
+            + "Nothing was read, written, or removed for it."
+    }
+
     // MARK: - Copy
 
     private func copy(plan: TransferPlan, manifest: inout TransferManifest,
@@ -244,7 +251,19 @@ public actor TransferCoordinator {
                     await recordBytes(file.byteCount)
                     continue
                 }
-                let destination = location.originalsRoot.appending(path: file.relativeDestinationPath)
+                guard let destination = TransferLayout.containedURL(
+                    relativePath: file.relativeDestinationPath, under: location.originalsRoot) else {
+                    // Nothing outside this transfer's own tree is ever removed or
+                    // written, whatever the record says. Recorded as a failure so
+                    // the destination cannot be reported verified.
+                    manifest.files[index].destinations[location.destination.id]?.copyState = .failed
+                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                    manifest.files[index].destinations[location.destination.id]?.error =
+                        Self.escapingPathError(file.relativeDestinationPath)
+                    try await persist(manifest, locations: locations)
+                    await recordBytes(file.byteCount)
+                    continue
+                }
                 if await fileSystem.exists(destination) {
                     let evidence = ConflictEvidence(
                         relativePath: file.relativeDestinationPath,
@@ -321,7 +340,15 @@ public actor TransferCoordinator {
     /// the never-touch-the-source rule — the source is still never written to.
     private func applyTimestamps(_ manifest: inout TransferManifest, fileIndex: Int, location: Location) async {
         let file = manifest.files[fileIndex]
-        let url = location.originalsRoot.appending(path: file.relativeDestinationPath)
+        guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
+                                                    under: location.originalsRoot) else {
+            // `setAttributes` on a path out of the tree would write metadata to
+            // whatever it landed on — the mounted card included.
+            manifest.files[fileIndex].destinations[location.destination.id]?.timestamps = TimestampOutcome(
+                creationDate: .failed, modificationDate: .failed,
+                error: Self.escapingPathError(file.relativeDestinationPath))
+            return
+        }
         let outcome: TimestampOutcome
         do {
             outcome = try await fileSystem.applyTimestamps(
@@ -358,10 +385,10 @@ public actor TransferCoordinator {
         }
         try await persist(manifest, locations: locations)
         let outcomes = locations.map { location -> DestinationOutcome in
-            let values = manifest.files.compactMap { $0.destinations[location.destination.id] }
+            let values = manifest.files.map { $0.destinations[location.destination.id] }
             return DestinationOutcome(id: location.destination.id, label: location.destination.label,
-                                      verifiedFiles: values.count { $0.verification == .verified },
-                                      failedFiles: values.count { $0.verification != .verified },
+                                      verifiedFiles: values.count { $0?.verification == .verified },
+                                      failedFiles: values.count { $0?.verification != .verified },
                                       finalURL: nil)
         }
         // Resuming needs the card again, so this is not the moment to eject it.
@@ -396,8 +423,15 @@ public actor TransferCoordinator {
                     await recordBytes(file.byteCount)
                     continue
                 }
-                jobs.append(.init(destinationID: location.destination.id,
-                                  url: location.originalsRoot.appending(path: file.relativeDestinationPath)))
+                guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
+                                                            under: location.originalsRoot) else {
+                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                    manifest.files[index].destinations[location.destination.id]?.error =
+                        Self.escapingPathError(file.relativeDestinationPath)
+                    await recordBytes(file.byteCount)
+                    continue
+                }
+                jobs.append(.init(destinationID: location.destination.id, url: url))
             }
             let records = try await checksums(for: jobs, expectedSize: file.byteCount, readers: readers)
             for record in records {
@@ -481,9 +515,13 @@ public actor TransferCoordinator {
 
     private func finish(plan: TransferPlan, manifest: inout TransferManifest,
                         locations: [Location]) async throws -> TransferOutcome {
+        // Every file is counted, present in the destination's record or not: a
+        // file with no entry has not been verified, and dropping it from both
+        // counts would finalise a destination on a record that never mentions it.
         let destinationResults = locations.map { location -> (Location, Int, Int) in
-            let values = manifest.files.compactMap { $0.destinations[location.destination.id] }
-            return (location, values.count { $0.verification == .verified }, values.count { $0.verification != .verified })
+            let values = manifest.files.map { $0.destinations[location.destination.id] }
+            return (location, values.count { $0?.verification == .verified },
+                    values.count { $0?.verification != .verified })
         }
         let successes = destinationResults.count { $0.2 == 0 }
         noteTimestampShortfalls(&manifest, locations: locations)
