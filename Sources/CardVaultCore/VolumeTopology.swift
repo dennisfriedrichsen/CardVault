@@ -207,6 +207,16 @@ extension VolumeFormat {
     /// True for the formats Windows reads natively, and therefore the ones whose
     /// contents are likely to be carried to a Windows machine later.
     public var isWindowsNative: Bool { self == .exfat || self == .fat }
+
+    /// The largest file the format can store, for the formats that cap it.
+    ///
+    /// FAT refuses a file of 4 GiB or more outright, whatever the free space:
+    /// measured on a FAT32 image with 6 GB available, where 4294967295 bytes
+    /// wrote and 4294967296 failed with `EFBIG`. exFAT has no such limit, which
+    /// is exactly why cameras moved to it for 4K video, so this must stay
+    /// FAT-only. FAT16 shares the cap trivially — its whole volume tops out at
+    /// 4 GB — so the one value covers both members of the family.
+    public var maximumFileSize: Int64? { self == .fat ? 4_294_967_295 : nil }
 }
 
 extension VolumeIdentity {

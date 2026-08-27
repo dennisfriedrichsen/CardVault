@@ -28,6 +28,10 @@ public enum FileSystemError: Error, Equatable, Sendable {
     case unexpectedEndOfFile(String)
     case existingConflict(String)
     case sourceChanged(String)
+    /// The destination's format caps file size below what the source file needs.
+    /// Preflight blocks this before any copying starts; reaching it at runtime
+    /// means the destination changed after preflight ran.
+    case fileTooLargeForFormat(String, byteCount: Int64)
 }
 
 /// These reach the user through `localizedDescription`, so every case says what
@@ -54,6 +58,8 @@ extension FileSystemError: LocalizedError {
             "\(path) already exists, and CardVault never overwrites existing content"
         case .sourceChanged(let name):
             "\(name) changed on the card while it was being read"
+        case .fileTooLargeForFormat(let name, let byteCount):
+            "\(name) is \(byteCount.formatted(.byteCount(style: .file))), which is larger than the destination's format can store in one file"
         }
     }
 }
@@ -260,7 +266,7 @@ public actor LocalFileSystem {
             guard copied == expectedSize else { throw FileSystemError.sourceChanged(source.lastPathComponent) }
         } catch {
             try? fileManager.removeItem(at: destination)
-            throw error
+            throw Self.named(error, copying: source, expectedSize: expectedSize)
         }
     }
 
@@ -333,6 +339,25 @@ public actor LocalFileSystem {
     private func agrees(_ readBack: Date?, _ expected: Date, _ tolerance: TimeInterval) -> Bool {
         guard let readBack else { return false }
         return abs(readBack.timeIntervalSince(expected)) <= tolerance
+    }
+
+    /// `EFBIG` is the destination format refusing the file's size outright — FAT
+    /// cannot hold 4 GiB or more — and it arrives as a bare POSIX error, which
+    /// would surface to the user as "File too large" with nothing said about the
+    /// destination being the cause. Preflight blocks this case, so reaching it
+    /// means the destination changed underneath us; it still has to explain
+    /// itself when it does.
+    private static func named(_ error: Error, copying source: URL, expectedSize: Int64) -> Error {
+        guard posixCode(of: error) == EFBIG else { return error }
+        return FileSystemError.fileTooLargeForFormat(source.lastPathComponent, byteCount: expectedSize)
+    }
+
+    private static func posixCode(of error: Error) -> Int32? {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain { return Int32(nsError.code) }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain { return Int32(underlying.code) }
+        return nil
     }
 
     public func move(_ source: URL, to destination: URL) async throws {
