@@ -118,6 +118,15 @@ public struct TransferPreflightService: Sendable {
             for second in destinations.indices where second > first {
                 let one = destinations[first]
                 let other = destinations[second]
+                // Overlapping roots are checked before volume identity because
+                // they are the stronger fact: two destinations under one path
+                // are one copy, so saying only that they share a volume would
+                // understate it. Both directions of nesting are checked, so the
+                // order the user picked the folders in does not change the verdict.
+                if let overlap = overlapIssue(one, other) ?? overlapIssue(other, one) {
+                    issues.append(overlap)
+                    continue
+                }
                 switch one.volume.relation(to: other.volume) {
                 case .sameVolume:
                     issues.append(.init(code: "same-volume", severity: .warning,
@@ -131,6 +140,25 @@ public struct TransferPreflightService: Sendable {
             }
         }
         return issues
+    }
+
+    /// A second destination that resolves to the first, or sits inside it, is not
+    /// a second copy: both write the same tree, so one deletion loses both and
+    /// the transfer cannot finalise two identical folders into one name. This
+    /// blocks rather than warns because the run would otherwise report a backup
+    /// the user does not have.
+    private func overlapIssue(_ one: DestinationPlan, _ other: DestinationPlan) -> PreflightIssue? {
+        let onePath = URL(filePath: one.rootPath, directoryHint: .isDirectory).standardizedFileURL.path
+        let otherPath = URL(filePath: other.rootPath, directoryHint: .isDirectory).standardizedFileURL.path
+        if onePath == otherPath {
+            return .init(code: "destination-overlap", severity: .blocking,
+                         message: "\(one.label) and \(other.label) are the same folder, so only one copy would be made. Choose a different folder for \(other.label).")
+        }
+        if otherPath.hasPrefix(onePath + "/") {
+            return .init(code: "destination-overlap", severity: .blocking,
+                         message: "\(other.label) is inside \(one.label), so the two copies would not be independent. Choose a folder outside \(one.label) for \(other.label).")
+        }
+        return nil
     }
 
     private func collisionIssues(files: [SourceFile], destinations: [DestinationPlan]) -> [PreflightIssue] {

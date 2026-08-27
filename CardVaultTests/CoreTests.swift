@@ -161,6 +161,43 @@ struct CoreTests {
         }
     }
 
+    @Test("Preflight blocks a backup that is the same folder as the primary")
+    func duplicateDestinationFolder() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.appending(path: "out")
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let plan = makePlan(source: root.appending(path: "card"), destinations: [destination, destination], files: [])
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(result.issues.contains { $0.code == "destination-overlap" && $0.severity == .blocking })
+            #expect(!result.canProceed)
+            // The stronger path fact replaces the volume warning rather than joining it.
+            #expect(!result.issues.contains { $0.code == "same-volume" || $0.code == "same-device" })
+        }
+    }
+
+    @Test("Preflight blocks a backup nested inside the primary, in either order")
+    func nestedDestinationFolder() throws {
+        try withTemporaryDirectorySync { root in
+            let outer = root.appending(path: "out")
+            let inner = outer.appending(path: "backup")
+            try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+            let source = root.appending(path: "card")
+            for pair in [[outer, inner], [inner, outer]] {
+                let result = TransferPreflightService(safetyMarginBytes: 0)
+                    .validate(makePlan(source: source, destinations: pair, files: []))
+                #expect(result.issues.contains { $0.code == "destination-overlap" && $0.severity == .blocking })
+            }
+        }
+    }
+
+    @Test("A file system failure describes itself instead of showing an error number")
+    func fileSystemErrorsAreReadable() {
+        let message = FileSystemError.existingConflict("/Volumes/Photos/2026-08-26").localizedDescription
+        #expect(message.contains("/Volumes/Photos/2026-08-26"))
+        #expect(!message.contains("error 7"))
+        #expect(FileSystemError.sourceChanged("IMG.CR3").localizedDescription.contains("IMG.CR3"))
+    }
+
     @Test("Preflight warns when both copies share one physical device")
     func sameDeviceWarning() throws {
         try withTemporaryDirectorySync { root in
