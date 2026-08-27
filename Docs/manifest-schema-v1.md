@@ -11,7 +11,10 @@ relative. Mount paths and security-scoped bookmark bytes are deliberately exclud
 Each file records its source and destination relative paths, media classification, size, relevant
 timestamps, source SHA-256, and an independent copy/verification result for every destination UUID.
 A file is verified only when the SHA-256 calculated by rereading a closed destination file equals
-the source SHA-256. The `verifiedAt` date is present only after required verification succeeds.
+the source SHA-256. The `verifiedAt` date is present only after required verification succeeds. The
+reread has to be one the finishing run performed: a resumed transfer rereads every `copied` and every
+`skipped` destination file it did not already read itself, so no destination is finalized on the
+strength of a digest an earlier run recorded and this one never confirmed.
 
 ## Duplicate and conflict classification
 

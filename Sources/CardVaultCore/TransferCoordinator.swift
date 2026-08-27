@@ -38,6 +38,12 @@ public actor TransferCoordinator {
     private let classifier: ConflictClassifier
     private let now: @Sendable () -> Date
 
+    /// Destination copies this run itself read back and matched to the source,
+    /// as the classifier does when it satisfies a file instead of copying it.
+    /// A claim made by an earlier run is not in here, which is what makes it
+    /// possible to reread exactly those.
+    private var readBackThisRun: Set<ReadBack> = []
+
     /// Precise counters live here, on the coordinator. Only throttled snapshots
     /// ever reach the progress handler, so a fast drive cannot flood the caller.
     private var aggregator: ProgressAggregator?
@@ -72,7 +78,8 @@ public actor TransferCoordinator {
     private func run(plan: TransferPlan, manifest: inout TransferManifest, locations: [Location],
                      progress: ProgressHandler?) async throws -> TransferOutcome {
         progressHandler = progress
-        defer { progressHandler = nil; aggregator = nil }
+        readBackThisRun = []
+        defer { progressHandler = nil; aggregator = nil; readBackThisRun = [] }
         manifest.state = .copying
         try await persist(manifest, locations: locations)
 
@@ -100,6 +107,11 @@ public actor TransferCoordinator {
             await persistBestEffort(manifest, locations: locations)
             throw error
         }
+    }
+
+    private struct ReadBack: Hashable, Sendable {
+        let fileIndex: Int
+        let destinationID: UUID
     }
 
     private struct Location: Sendable {
@@ -283,6 +295,9 @@ public actor TransferCoordinator {
                             assessment.existingChecksum
                         manifest.files[index].destinations[location.destination.id]?.verification = .verified
                         manifest.files[index].destinations[location.destination.id]?.error = nil
+                        // The digest came from this run's own read of the bytes
+                        // on disk, so verification has nothing left to confirm.
+                        readBackThisRun.insert(ReadBack(fileIndex: index, destinationID: location.destination.id))
                         // A satisfied file is part of this archive, so it carries
                         // the same dates as everything copied beside it.
                         await applyTimestamps(&manifest, fileIndex: index, location: location)
@@ -419,7 +434,16 @@ public actor TransferCoordinator {
             await beginFile(file.relativeSourcePath)
             var jobs: [VerificationJob] = []
             for location in locations {
-                guard manifest.files[index].destinations[location.destination.id]?.copyState == .copied else {
+                // `.copied` and `.skipped` both mean bytes CardVault stands
+                // behind are supposed to be at this path, and both are read
+                // back here. A `.skipped` file recorded by an earlier run is
+                // the one case where a verified claim would otherwise rest on
+                // a read this process never performed — however long ago that
+                // run was, and whatever happened to the file since.
+                let copyState = manifest.files[index].destinations[location.destination.id]?.copyState
+                let alreadyReadBack = readBackThisRun.contains(
+                    ReadBack(fileIndex: index, destinationID: location.destination.id))
+                guard copyState == .copied || (copyState == .skipped && !alreadyReadBack) else {
                     await recordBytes(file.byteCount)
                     continue
                 }
