@@ -20,6 +20,13 @@
 			remoteGlobalIDString = A80000000000000000000001;
 			remoteInfo = CardVaultCore;
 		};
+		A30000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A90000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A80000000000000000000002;
+			remoteInfo = CardVault;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -164,6 +171,7 @@
 			);
 			dependencies = (
 				D10000000000000000000002 /* PBXTargetDependency */,
+				D10000000000000000000003 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A50000000000000000000003 /* CardVaultTests */,
@@ -273,6 +281,11 @@
 			isa = PBXTargetDependency;
 			target = A80000000000000000000001 /* CardVaultCore */;
 			targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */;
+		};
+		D10000000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A80000000000000000000002 /* CardVault */;
+			targetProxy = A30000000000000000000002 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -412,9 +425,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T5MRHCWRRV;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = com.dennisfriedrichsen.CardVaultTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.friedrichsenweb.CardVaultTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CardVault.app/Contents/MacOS/CardVault";
 			};
@@ -424,9 +439,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T5MRHCWRRV;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = com.dennisfriedrichsen.CardVaultTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.friedrichsenweb.CardVaultTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CardVault.app/Contents/MacOS/CardVault";
 			};
