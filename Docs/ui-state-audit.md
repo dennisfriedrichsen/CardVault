@@ -37,6 +37,11 @@ Each state links its light capture; the dark capture is the same name with
 | `ready` | [png](ui-states/ready-light.png) | `checkmark.circle` | neutral | Ready to transfer… |
 | `preflightWarning` | [png](ui-states/preflightWarning-light.png) | `exclamationmark.triangle.fill` | attention | Ready to transfer, with warnings… |
 | `preflightBlocked` | [png](ui-states/preflightBlocked-light.png) | `exclamationmark.octagon.fill` | blocked | Cannot start… Nothing has been copied. |
+
+> The `preflightWarning` and `preflightBlocked` images predate the correction of the preflight
+> fixtures, which used to pose two warnings the app cannot emit. Those two states now show real
+> `same-device` and `insufficient-space` output, so their layout and wrapping conclusions hold only
+> once the set is recaptured — the two rows above are the ones to look at first at the next audit.
 | `copying` | [png](ui-states/copying-light.png) | `doc.on.doc.fill` | in progress | Copying. Do not remove the card yet. |
 | `copyCompleteVerificationPending` | [png](ui-states/copyCompleteVerificationPending-light.png) | `hourglass.circle.fill` | in progress | Copy complete. Verification has not finished… |
 | `verifying` | [png](ui-states/verifying-light.png) | `checkmark.shield` | in progress | Verifying copied files. Do not remove the card yet. |

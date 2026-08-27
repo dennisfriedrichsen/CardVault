@@ -24,6 +24,12 @@ fixture data come from `Sources/CardVaultCore/StatusPresentation.swift` and
 `Sources/CardVaultCore/UIStateFixtures.swift`, so the screenshots and the
 assertions in `CardVaultTests/UIStateTests.swift` describe the same states.
 
+The preflight fixtures are the output of `TransferPreflightService.validate` on a
+synthetic plan, not hand-written `PreflightIssue` values. Both of `validate`'s
+probes are injected, so it stays a pure function of the plan — and a warning the
+code cannot produce cannot be posed. Change the situation the plan describes, not
+the message.
+
 A posed model does no I/O: `AppModel.isPosed` short-circuits `refresh()` and
 `refreshDetectedVolumes()`. A capture run cannot touch a card, a destination, the
 bookmark store, or the history index.
