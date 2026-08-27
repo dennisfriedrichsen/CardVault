@@ -14,8 +14,37 @@ public enum TransferMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// What a file is *for*, which is what a summary should report. A card may hold
+/// only video, only JPEG, or a mix; nothing here assumes a stills workflow.
+public enum MediaCategory: String, Codable, Sendable, CaseIterable {
+    case photo, video, audio, sidecar, other
+
+    public var title: String {
+        switch self {
+        case .photo: "Photos"
+        case .video: "Videos"
+        case .audio: "Audio"
+        case .sidecar: "Sidecars"
+        case .other: "Other files"
+        }
+    }
+}
+
 public enum MediaKind: String, Codable, Sendable {
-    case raw, jpeg, heif, tiff, png, video, sidecar, other
+    case raw, jpeg, heif, tiff, png, video, audio, sidecar, other
+
+    public var category: MediaCategory {
+        switch self {
+        case .raw, .jpeg, .heif, .tiff, .png: .photo
+        case .video: .video
+        case .audio: .audio
+        case .sidecar: .sidecar
+        case .other: .other
+        }
+    }
+
+    /// Sidecars count as media: a proxy or per-clip metadata file left behind is
+    /// a loss the camera cannot regenerate.
     public var isRecognizedMedia: Bool { self != .other }
 }
 

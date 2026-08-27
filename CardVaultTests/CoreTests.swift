@@ -88,6 +88,47 @@ struct CoreTests {
             #expect(result.excludedFiles.count == 1)
             #expect(result.rawJPEGPairCount == 1)
             #expect(result.files.contains { $0.relativePath == "DCIM/100CANON/日本.mov" })
+            #expect(result.composition.fileCount(of: .photo) == 2)
+            #expect(result.composition.fileCount(of: .video) == 1)
+        }
+    }
+
+    @Test("A video card describes itself without borrowing stills vocabulary")
+    func scanVideoCard() throws {
+        try withTemporaryDirectorySync { root in
+            let dcim = root.appending(path: "DCIM/100GOPRO")
+            try FileManager.default.createDirectory(at: dcim, withIntermediateDirectories: true)
+            try Data([1, 2, 3, 4]).write(to: dcim.appending(path: "GX010007.MP4"))
+            try Data([1, 2]).write(to: dcim.appending(path: "GL010007.LRV"))
+            try Data([1]).write(to: dcim.appending(path: "GX010007.THM"))
+            try Data([1]).write(to: dcim.appending(path: "GOPR0042.JPG"))
+            try Data([1]).write(to: dcim.appending(path: "GOPR0043.GPR"))
+            let result = try SourceScanner().scan(root: root, mode: .mediaOnly)
+
+            // The proxy and the thumbnail are written by the camera and cannot be
+            // regenerated from the clip, so media-only must not drop them.
+            #expect(result.files.count == 5)
+            #expect(result.excludedFiles.isEmpty)
+            #expect(result.rawJPEGPairCount == 0)
+            #expect(result.composition.fileCount(of: .video) == 1)
+            #expect(result.composition.fileCount(of: .photo) == 2)
+            #expect(result.composition.fileCount(of: .sidecar) == 2)
+            #expect(result.composition.groups.map(\.category) == [.photo, .video, .sidecar])
+        }
+    }
+
+    @Test("A JPEG-only card reports no pairs and only the categories it holds")
+    func scanJPEGOnlyCard() throws {
+        try withTemporaryDirectorySync { root in
+            let dcim = root.appending(path: "DCIM/101NIKON")
+            try FileManager.default.createDirectory(at: dcim, withIntermediateDirectories: true)
+            try Data([1]).write(to: dcim.appending(path: "DSC_0001.JPG"))
+            try Data([2, 3]).write(to: dcim.appending(path: "DSC_0002.JPG"))
+            let result = try SourceScanner().scan(root: root, mode: .mediaOnly)
+            #expect(result.rawJPEGPairCount == 0)
+            #expect(result.composition.groups.count == 1)
+            #expect(result.composition.groups.first?.category == .photo)
+            #expect(result.composition.groups.first?.byteCount == 3)
         }
     }
 
