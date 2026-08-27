@@ -444,6 +444,17 @@ struct RecoveryTests {
             #expect(manifest.transferID == fixture.plan.id)
         }
     }
+
+    /// Recovery describes what a transfer was doing when it stopped. A transfer
+    /// the user stopped deliberately reported "Unknown", which reads as a fault
+    /// report for something that was not a fault.
+    @Test("A transfer the user stopped is described as stopped, not as unknown")
+    func stoppedTransferIsNamed() {
+        let operation = InterruptedOperation(state: .cancelled)
+        #expect(operation == .stoppedByUser)
+        #expect(operation != .unknown)
+        #expect(operation.title == "Stopped by you")
+    }
 }
 
 // MARK: - Fixture

@@ -38,9 +38,18 @@ struct ContentView: View {
             }
             ToolbarSpacer(.fixed)
             ToolbarItem(placement: .primaryAction) {
-                Button("Start Transfer", systemImage: "arrow.right.circle.fill") { model.beginTransfer() }
-                    .disabled(model.preflight?.canProceed != true || model.isWorking)
-                    .keyboardShortcut(.return, modifiers: .command)
+                // The two are exclusive on purpose: the toolbar's action slot
+                // always offers the one thing the transfer can be told to do now.
+                if model.showsStopControl {
+                    Button("Stop Transfer", systemImage: "stop.circle.fill") { model.cancelTransfer() }
+                        .disabled(!model.canStopTransfer)
+                        .keyboardShortcut(".", modifiers: .command)
+                        .help(model.stopUnavailableReason ?? "Stop the transfer (Command-Period). Verified files are kept and the source is not touched.")
+                } else {
+                    Button("Start Transfer", systemImage: "arrow.right.circle.fill") { model.beginTransfer() }
+                        .disabled(model.preflight?.canProceed != true || model.isWorking)
+                        .keyboardShortcut(.return, modifiers: .command)
+                }
             }
         }
     }
@@ -77,13 +86,25 @@ struct TransferView: View {
                     }
                 }
                 if let copy = model.copyProgress {
-                    PhaseProgress(progress: copy, isTransferFinished: model.outcome != nil)
+                    PhaseProgress(progress: copy, isTransferFinished: model.outcome != nil,
+                                  isStopped: model.status == .cancelled)
                 }
                 if let verification = model.verificationProgress {
-                    PhaseProgress(progress: verification, isTransferFinished: model.outcome != nil)
+                    PhaseProgress(progress: verification, isTransferFinished: model.outcome != nil,
+                                  isStopped: model.status == .cancelled)
                 }
                 if model.isFinalizing && model.outcome == nil {
                     Label("Finalizing verified transfer…", systemImage: "hourglass").font(.callout)
+                }
+                // Under the progress it is stopping, not in the toolbar only: a
+                // user who wants out of a transfer is looking at the bar.
+                if model.showsStopControl {
+                    stopTransferButton
+                    if let reason = model.stopUnavailableReason {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .accessibilityHidden(true) // Already the button's hint.
+                    }
                 }
             }.padding(24)
         }
@@ -106,7 +127,7 @@ struct TransferView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Status: \(model.message). \(presentation.detail)")
             Spacer()
-            if model.outcome?.safeToEject == true {
+            if model.canEjectSource {
                 Button("Eject Card", systemImage: "eject.fill") { model.ejectSource() }
                     .keyboardShortcut("e", modifiers: .command)
                     .help("Eject the source card (Command-E). Ejecting never erases anything.")
@@ -130,6 +151,26 @@ struct TransferView: View {
         .disabled(!canStart)
         .help(startUnavailableReason ?? "Start Transfer (Command-Return)")
         .accessibilityHint(startUnavailableReason ?? "Copies and verifies the selected files at each destination.")
+    }
+
+    /// Deliberately not destructive-red: stopping destroys nothing. It keeps
+    /// every verified file, discards only the partial write in flight, and never
+    /// touches the card.
+    private var stopTransferButton: some View {
+        Button {
+            model.cancelTransfer()
+        } label: {
+            Label(model.isCancelling ? "Stopping…" : "Stop Transfer", systemImage: "stop.circle.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(!model.canStopTransfer)
+        .help(model.stopUnavailableReason ?? "Stop the transfer (Command-Period).")
+        .accessibilityHint(model.stopUnavailableReason
+            ?? "Stops the transfer. Files already verified are kept, the partly written file is discarded, and the source is not changed.")
     }
 
     private var canStart: Bool { model.preflight?.canProceed == true && !model.isWorking }
@@ -288,6 +329,10 @@ private struct PhaseProgress: View {
     /// A finished transfer has its own result. Without this the copy card kept
     /// saying verification was still in progress after it had finished.
     let isTransferFinished: Bool
+    /// A stopped transfer's last snapshot is a record of how far it got, not a
+    /// forecast. Left as-is it kept offering a rate and a time remaining for
+    /// work that is not happening.
+    let isStopped: Bool
     /// A bar that slides on every throttled snapshot is motion. The numbers are
     /// the information; the sliding is not, so it goes first.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -327,15 +372,17 @@ private struct PhaseProgress: View {
     }
 
     private var title: String {
-        switch progress.phase {
+        let phase = switch progress.phase {
         case .copying: "Copying"
         case .verifying: "Verification"
         case .finalizing: "Finalizing"
         }
+        return isStopped ? "\(phase) — stopped" : phase
     }
 
     /// Rate and remaining time are estimates and are labelled as such.
     private var estimates: String? {
+        guard !isStopped else { return nil }
         let parts = [rateText, remainingText].compactMap { $0 }
         guard !parts.isEmpty else { return nil }
         return "Estimated · " + parts.joined(separator: " · ")
