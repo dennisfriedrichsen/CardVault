@@ -141,7 +141,13 @@ final class AppModel {
         Task {
             // Recorded before the first byte moves: if this run is interrupted,
             // relaunch recovery can only find these roots through these keys.
-            await rememberRoots(for: plan)
+            let unrecorded = await rememberRoots(for: plan)
+            if !unrecorded.isEmpty {
+                let roots = unrecorded.formatted(.list(type: .and))
+                errorMessage = "CardVault could not record how to reach \(roots) after a relaunch. "
+                    + "The transfer will run and verify normally, but if it is interrupted it cannot "
+                    + "be resumed automatically. Choosing the folders again before starting records them."
+            }
             do {
                 outcome = try await coordinator.execute(plan: plan) { [weak self] update in
                     await self?.receive(update)
@@ -412,15 +418,35 @@ final class AppModel {
         }
     }
 
-    private func rememberRoots(for plan: TransferPlan) async {
+    /// Returns the roots whose keys could not be written. A failure here costs
+    /// nothing now and everything later, so it is reported rather than dropped:
+    /// without these keys an interrupted transfer cannot be resumed at all.
+    private func rememberRoots(for plan: TransferPlan) async -> [String] {
+        var unrecorded: [String] = []
         if let sourceURL {
-            try? await bookmarkStore.save(url: sourceURL, key: BookmarkKey.source(transferID: plan.id))
+            do {
+                try await bookmarkStore.save(url: sourceAccess?.url ?? sourceURL,
+                                             key: BookmarkKey.source(transferID: plan.id))
+            } catch {
+                unrecorded.append(sourceVolume?.displayName ?? "the source")
+            }
         }
+        // A URL rebuilt from a path string is not the one the open panel granted
+        // access to, and only that one can be bookmarked with security scope.
+        let granted = [primaryAccess?.url ?? destinationURL,
+                       backupAccess?.url ?? backupURL].compactMap { $0 }
         for destination in plan.destinations {
-            try? await bookmarkStore.save(
-                url: URL(filePath: destination.rootPath, directoryHint: .isDirectory),
-                key: BookmarkKey.destination(transferID: plan.id, destinationID: destination.id))
+            let url = granted.first { $0.path == destination.rootPath }
+                ?? URL(filePath: destination.rootPath, directoryHint: .isDirectory)
+            do {
+                try await bookmarkStore.save(
+                    url: url,
+                    key: BookmarkKey.destination(transferID: plan.id, destinationID: destination.id))
+            } catch {
+                unrecorded.append(destination.label)
+            }
         }
+        return unrecorded
     }
 
     private func forgetRoots(transferID: UUID) async {
