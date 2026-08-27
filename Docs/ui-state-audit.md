@@ -45,13 +45,16 @@ Each state links its light capture; the dark capture is the same name with
 | `primaryVerifiedBackupIncomplete` | [png](ui-states/primaryVerifiedBackupIncomplete-light.png) | `externaldrive.badge.exclamationmark` | attention | Primary verified. Backup incomplete… |
 | `conflictPaused` | [png](ui-states/conflictPaused-light.png) | `hand.raised.fill` | attention | Paused. *n* files need a decision… |
 | `interrupted` | [png](ui-states/interrupted-light.png) | `bolt.horizontal.circle.fill` | attention | Transfer interrupted… can be resumed. |
+| `cancelled` | [png](ui-states/cancelled-light.png) | `stop.circle.fill` | attention | Transfer stopped… verified stays verified… safe to eject. |
 | `needsAttention` | [png](ui-states/needsAttention-light.png) | `exclamationmark.circle.fill` | attention | Transfer needs attention… |
 | `failed` | [png](ui-states/failed-light.png) | `xmark.octagon.fill` | blocked | Transfer failed. No destination was verified… |
 | `safeToEject` | [png](ui-states/safeToEject-light.png) | `eject.fill` | success | Safe to eject. Safe to eject does not mean safe to erase. |
 | `ejected` | [png](ui-states/ejected-light.png) | `eject.circle.fill` | success | Card ejected. Ready for the next transfer… |
 
 `interrupted` is captured as the relaunch recovery sheet over the window, because
-that sheet *is* the state a user meets it in.
+that sheet *is* the state a user meets it in. `cancelled` is captured behind that
+sheet: stopping raises the same sheet, and this is the screen left once it has
+been dismissed.
 
 ## Findings and what was done
 
@@ -108,6 +111,16 @@ that sheet *is* the state a user meets it in.
 14. **Half the keyboard paths existed only on toolbar buttons.** Menu items were
     added for every shortcut (see below), so they are discoverable and reachable
     from the menu bar.
+15. **A running transfer could not be stopped.** The coordinator has always
+    stopped cleanly on cancellation — discarding the partial write, recording
+    `cancelled` in the manifest, leaving the transfer resumable — but nothing in
+    the UI held the task, so the only way out of a mistaken transfer was to
+    quit the app or pull the card, which is the one thing every other state
+    tells the user not to do. `Stop Transfer` now sits in the toolbar (replacing
+    `Start Transfer` while work runs), under the progress bars, and in the menu
+    at ⌘. — and the state it lands in is `cancelled`, named for the user's own
+    decision rather than folded into `interrupted`, which describes something
+    going wrong.
 
 ### Accepted as-is
 
@@ -136,7 +149,8 @@ that sheet *is* the state a user meets it in.
 | Choose Primary Destination… | ⌘D | Menu + Destinations card |
 | Choose Backup Destination… | ⇧⌘D | Menu + Destinations card |
 | Start Transfer | ⌘↩ | Menu + toolbar + main button |
-| Eject Card | ⌘E | Menu + header button (enabled only when safe to eject) |
+| Stop Transfer | ⌘. | Menu + toolbar + button under the progress bars |
+| Eject Card | ⌘E | Menu + header button (enabled when verified, or after a stop) |
 | Dismiss recovery sheet | Esc | "Decide Later" is the cancel action |
 | Dismiss error alert | ↩ | "OK" is the default button |
 

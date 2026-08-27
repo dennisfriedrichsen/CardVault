@@ -25,6 +25,7 @@ public enum PrincipalUIState: String, CaseIterable, Sendable {
     case primaryVerifiedBackupIncomplete
     case conflictPaused
     case interrupted
+    case cancelled
     case needsAttention
     case failed
     case safeToEject
@@ -212,6 +213,17 @@ extension StatusPresentation {
                 symbolName: "bolt.horizontal.circle.fill",
                 tone: .attention,
                 announcement: "Transfer interrupted. The card is safe to eject and the transfer can be resumed.")
+        case .cancelled:
+            StatusPresentation(
+                state: state,
+                // Named for who stopped it. An interrupted transfer is something
+                // that happened to the user; this one is something they chose,
+                // and the difference decides whether they go looking for a fault.
+                title: "Transfer stopped — Safe to eject",
+                detail: "Every file already verified stays verified, and the source was not changed. The rest can be resumed.",
+                symbolName: "stop.circle.fill",
+                tone: .attention,
+                announcement: "Transfer stopped. Every file already verified stays verified, the source was not changed, and the card is safe to eject.")
         case .needsAttention:
             StatusPresentation(
                 state: state,
