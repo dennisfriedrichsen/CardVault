@@ -11,6 +11,10 @@ The script builds the Debug app, runs it with `--capture-ui-states`, and copies
 the result into `Docs/ui-states/`. Review the diff before committing: a change to
 any of these files is a change to what the app shows.
 
+Run it when you are auditing the UI — not on every change or PR that touches a
+view. These screenshots are evidence for `ui-state-audit.md`; nothing in the test
+suite reads them, so they are allowed to lag behind the app between audits.
+
 ## What the capture actually does
 
 `CardVault/UIStateGallery.swift` (all inside `#if DEBUG`) walks
