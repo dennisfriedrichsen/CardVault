@@ -138,7 +138,7 @@ public struct CompatibleManifestIndex: Sendable {
         let manager = FileManager.default
         var urls: [URL] = []
         for root in searchRoots {
-            let direct = root.appending(path: ".cardvault/transfer-manifest.json")
+            let direct = root.appending(path: TransferLayout.manifestRelativePath)
             if manager.fileExists(atPath: direct.path) { urls.append(direct) }
             // Immediate children only. A destination drive may hold many past
             // transfers; it must never cost a full recursive walk to find them.
@@ -146,7 +146,7 @@ public struct CompatibleManifestIndex: Sendable {
                                                              options: [.skipsPackageDescendants])) ?? []
             for child in children {
                 guard (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
-                let candidate = child.appending(path: ".cardvault/transfer-manifest.json")
+                let candidate = child.appending(path: TransferLayout.manifestRelativePath)
                 if manager.fileExists(atPath: candidate.path) { urls.append(candidate) }
             }
         }
