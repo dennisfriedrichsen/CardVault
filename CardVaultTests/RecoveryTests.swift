@@ -136,6 +136,59 @@ struct RecoveryTests {
         }
     }
 
+    @Test("A destination on a shared volume is never bound to the other destination's folder")
+    func sharedVolumeDestinationIsNotGuessed() async throws {
+        try await withFixture(destinationCount: 2, destinationsShareVolume: true) { fixture in
+            try await fixture.seedStaging(state: .verifying) { _, _ in }
+            // Only the backup's folder is reachable, the way a lost primary
+            // bookmark leaves it.
+            let transfer = try #require(await fixture.coordinator()
+                .scan(destinationRoots: [fixture.destinationRoots[1]]).transfers.first)
+
+            let primary = try #require(transfer.destinations.first { $0.label == "Primary" })
+            // Identity says this tree matches; only exclusivity says it is not ours.
+            #expect(primary.root == nil)
+            #expect(primary.match == .unavailable)
+            // Before the fix this was the Backup's folder.
+            #expect(primary.root != fixture.destinationRoots[1])
+            #expect(!transfer.canResume)
+        }
+    }
+
+    @Test("Two destinations on one volume are not paired by identity alone")
+    func sharedVolumeDestinationsStayUnassigned() async throws {
+        try await withFixture(destinationCount: 2, destinationsShareVolume: true) { fixture in
+            try await fixture.seedStaging(state: .verifying) { _, _ in }
+            // Both trees are discoverable, and both match both destinations.
+            // Order of discovery must not decide which is which.
+            let transfer = try #require(await fixture.coordinator()
+                .scan(destinationRoots: fixture.destinationRoots).transfers.first)
+            #expect(transfer.destinations.allSatisfy { $0.root == nil })
+            #expect(!transfer.canResume)
+            #expect(transfer.blockingReason?.contains("Reconnect") == true)
+        }
+    }
+
+    @Test("Per-transfer bookmarks pair destinations on one volume exactly")
+    func sharedVolumeDestinationsPairByBookmark() async throws {
+        try await withFixture(destinationCount: 2, destinationsShareVolume: true) { fixture in
+            try await fixture.seedStaging(state: .verifying) { _, _ in }
+            let plans = fixture.plan.destinations
+            let transfer = try #require(await fixture.coordinator()
+                .scan(destinationRoots: fixture.destinationRoots,
+                      sourceRoots: [fixture.plan.id: .unscoped(fixture.source)],
+                      transferDestinationRoots: [fixture.plan.id: [
+                        plans[0].id: .unscoped(fixture.destinationRoots[0]),
+                        plans[1].id: .unscoped(fixture.destinationRoots[1])
+                      ]]).transfers.first)
+            let primary = try #require(transfer.destinations.first { $0.label == "Primary" })
+            let backup = try #require(transfer.destinations.first { $0.label == "Backup" })
+            #expect(primary.root == fixture.destinationRoots[0])
+            #expect(backup.root == fixture.destinationRoots[1])
+            #expect(transfer.canResume)
+        }
+    }
+
     @Test("A different volume wearing the same name is refused")
     func reformattedCardIsRefused() async throws {
         try await withFixture { fixture in
@@ -506,6 +559,7 @@ private struct RecoveryFixture {
 }
 
 private func withFixture(fileCount: Int = 2, destinationCount: Int = 1,
+                         destinationsShareVolume: Bool = false,
                          _ body: (RecoveryFixture) async throws -> Void) async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "CardVaultRecoveryTests-\(UUID().uuidString)")
@@ -531,12 +585,16 @@ private func withFixture(fileCount: Int = 2, destinationCount: Int = 1,
                                        root.appending(path: "impostor").standardizedFileURL.path: UUID()]
     let sourceVolume = VolumeIdentity(volumeUUID: sourceUUID, resourceIdentifier: sourceUUID.uuidString,
                                       displayName: "CARD", fileSystem: "exFAT", isRemovable: true)
+    // Two folders on one drive record one identity, which is the case that
+    // cannot be told apart by volume identity alone.
+    let sharedUUID = UUID()
     let destinations = destinationRoots.enumerated().map { index, url -> DestinationPlan in
-        let uuid = UUID()
+        let uuid = destinationsShareVolume ? sharedUUID : UUID()
         volumeUUIDs[url.standardizedFileURL.path] = uuid
+        let name = destinationsShareVolume ? "Macintosh HD" : url.lastPathComponent
         return DestinationPlan(id: UUID(), label: index == 0 ? "Primary" : "Backup", rootPath: url.path,
                                volume: VolumeIdentity(volumeUUID: uuid, resourceIdentifier: uuid.uuidString,
-                                                      displayName: url.lastPathComponent, fileSystem: "APFS"))
+                                                      displayName: name, fileSystem: "APFS"))
     }
     let files = try SourceScanner().scan(root: source, mode: .preserveCard).files
     let plan = TransferPlan(name: "Recovery Transfer", mode: .preserveCard, sourceRootPath: source.path,
