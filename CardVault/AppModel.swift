@@ -43,6 +43,16 @@ final class AppModel {
     }
     var errorMessage: String?
 
+    /// Why source, name, mode and destination selection are currently
+    /// unavailable, or nil when they can be changed. The running coordinator
+    /// already holds the plan it was started with, so an edit made while work is
+    /// under way would describe a transfer other than the one writing to disk.
+    var inputLockReason: String? {
+        guard isWorking else { return nil }
+        if status == .scanning { return "CardVault is scanning the source. Selections can change when the scan finishes." }
+        return "CardVault is busy. Selections cannot change until the current operation finishes."
+    }
+
     /// Unfinished transfers found at launch. Presented before anything else,
     /// because starting a new transfer over an interrupted one is the mistake
     /// this screen exists to prevent.

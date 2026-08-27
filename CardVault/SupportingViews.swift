@@ -28,11 +28,17 @@ struct CardVaultCommands: Commands {
         // exists only on a toolbar button cannot be discovered, and Full Keyboard
         // Access users reach the menu bar first.
         CommandGroup(after: .newItem) {
-            Button("Choose Source…") { model.chooseSource() }.keyboardShortcut("o", modifiers: .command)
+            // Disabled for the same reason as the cards themselves: a plan that
+            // is already running cannot take a new source or destination.
+            Button("Choose Source…") { model.chooseSource() }
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(model.inputLockReason != nil)
             Button("Choose Primary Destination…") { model.choosePrimary() }
                 .keyboardShortcut("d", modifiers: .command)
+                .disabled(model.inputLockReason != nil)
             Button("Choose Backup Destination…") { model.chooseBackup() }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(model.inputLockReason != nil)
             Divider()
             Button("Start Transfer") { model.beginTransfer() }
                 .keyboardShortcut(.return, modifiers: .command)

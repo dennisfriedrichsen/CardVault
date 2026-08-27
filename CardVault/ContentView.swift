@@ -35,6 +35,8 @@ struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button("Choose Source", systemImage: "sdcard") { model.chooseSource() }
                     .keyboardShortcut("o", modifiers: .command)
+                    .disabled(model.inputLockReason != nil)
+                    .help(model.inputLockReason ?? "Choose the card or folder to copy from (Command-O).")
             }
             ToolbarSpacer(.fixed)
             ToolbarItem(placement: .primaryAction) {
@@ -59,10 +61,21 @@ struct TransferView: View {
                     if outcome.requiresConflictResolution { ConflictsView(conflicts: outcome.conflicts) }
                     OutcomeView(outcome: outcome)
                 }
+                // What the running coordinator is copying was fixed when it
+                // started. Leaving these editable would let the screen describe a
+                // source, name or destination that is not the one on disk.
                 HStack(alignment: .top, spacing: 18) {
                     SourceCard(model: model)
                     ConfigurationCard(model: model)
                     DestinationsCard(model: model)
+                }
+                .disabled(model.inputLockReason != nil)
+                if let reason = model.inputLockReason {
+                    // A greyed-out card explains nothing on its own, and the
+                    // tooltip a disabled control cannot show is unreachable by
+                    // keyboard, so the reason is written out.
+                    Label(reason, systemImage: "lock")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
