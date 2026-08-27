@@ -32,13 +32,23 @@ struct HistoryView: View {
     }
 
     private var transferTable: some View {
+        // A VSplitView sizes its children from their own ideal width instead of
+        // stretching them, so an unconstrained Table settles at a narrow strip
+        // in the middle of the pane with every column truncated. The widths are
+        // stated here, and the name column is the one allowed to absorb the rest.
         Table(model.history, selection: $model.historySelection) {
             TableColumn("Transfer") { Text($0.name) }
+                .width(min: 180, ideal: 280)
             TableColumn("Date") { Text($0.date, format: .dateTime.year().month().day().hour().minute()) }
+                .width(min: 150, ideal: 170)
             TableColumn("Files") { Text($0.totalFiles, format: .number) }
+                .width(min: 60, ideal: 70)
             TableColumn("Size") { Text($0.totalBytes, format: .byteCount(style: .file)) }
+                .width(min: 80, ideal: 100)
             TableColumn("State") { Text($0.finalState.rawValue) }
+                .width(min: 130, ideal: 150)
         }
+        .frame(maxWidth: .infinity)
         .contextMenu(forSelectionType: TransferHistoryEntry.ID.self) { ids in
             if let entry = entry(in: ids) {
                 Button("Show Manifest in Finder") { model.revealManifest(for: entry) }
