@@ -18,7 +18,7 @@ struct RecoveryView: View {
                         RecoverableTransferCard(model: model, transfer: transfer)
                     }
                     if !scan.unreadable.isEmpty {
-                        UnreadableTransfersCard(transfers: scan.unreadable)
+                        UnreadableTransfersCard(model: model, transfers: scan.unreadable)
                     }
                 }.padding(20)
             }
@@ -203,6 +203,7 @@ private struct VolumeRow: View {
 }
 
 private struct UnreadableTransfersCard: View {
+    @Bindable var model: AppModel
     let transfers: [UnreadableTransfer]
 
     var body: some View {
@@ -212,8 +213,10 @@ private struct UnreadableTransfersCard: View {
                     .font(.callout)
                 ForEach(transfers) { transfer in
                     VStack(alignment: .leading, spacing: 2) {
-                        Label(transfer.stagingRoot.lastPathComponent, systemImage: "doc.badge.gearshape")
+                        Label(model.pathLabel(for: transfer.stagingRoot), systemImage: "doc.badge.gearshape")
                             .font(.callout.monospaced())
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(transfer.reason).font(.caption).foregroundStyle(.secondary)
                         if transfer.isUnsupportedSchema {
                             Text("Update CardVault to read this transfer.")

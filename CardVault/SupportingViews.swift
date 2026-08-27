@@ -3,8 +3,14 @@ import CardVaultCore
 import SwiftUI
 
 struct SettingsView: View {
+    @Bindable var model: AppModel
     var body: some View {
         Form {
+            Section("Display") {
+                Toggle("Show full paths", isOn: $model.showsFullPaths)
+                Text("Folders are named by their last path component. Turn this on when several of them share a name and only the path tells them apart.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Integrity") {
                 LabeledContent("Verification", value: "SHA-256, every destination")
                 LabeledContent("Source policy", value: "Strictly read-only")
@@ -14,7 +20,7 @@ struct SettingsView: View {
                 Text("Transfer rate and remaining time are estimates. They never affect verification.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped).frame(width: 520, height: 260).padding()
+        }.formStyle(.grouped).frame(width: 520, height: 360).padding()
     }
 }
 
