@@ -337,7 +337,7 @@ extension UIStateFixture {
         let destinations = [
             RecoveredDestination(id: primaryDestinationID, label: "Primary", recordedVolume: primaryVolume,
                                  root: URL(filePath: "/Volumes/Field Archive", directoryHint: .isDirectory),
-                                 stagingRoot: primaryURL, manifestURL: primaryURL.appending(path: ".cardvault/transfer-manifest.json"),
+                                 stagingRoot: primaryURL, manifestURL: TransferLayout.manifestURL(inStaging: primaryURL),
                                  match: .matched, bookmarkWasStale: false,
                                  copiedFiles: 7, verifiedFiles: 7, conflictedFiles: 0),
             RecoveredDestination(id: backupDestinationID, label: "Backup", recordedVolume: backupVolume,
