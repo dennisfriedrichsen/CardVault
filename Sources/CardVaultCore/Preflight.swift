@@ -71,16 +71,10 @@ public struct TransferPreflightService: Sendable {
                 issues.append(.init(code: "network-backup", severity: .warning,
                                     message: "Backup is on network storage. Keep it mounted until copying and verification finish."))
             }
-            if destination.volume.fileSystem.localizedCaseInsensitiveContains("exFAT") {
-                let forbidden = CharacterSet(charactersIn: "<>:\"\\|?*")
-                if plan.files.contains(where: { file in
-                    file.relativePath.split(separator: "/").contains { component in
-                        component.rangeOfCharacter(from: forbidden) != nil || component.hasSuffix(".") || component.hasSuffix(" ")
-                    }
-                }) {
-                    issues.append(.init(code: "exfat-name", severity: .blocking,
-                                        message: "A source filename is incompatible with exFAT/Windows naming rules."))
-                }
+            if destination.volume.format.isWindowsNative,
+               let awkward = plan.files.first(where: { Self.isAwkwardOnWindows($0.relativePath) }) {
+                issues.append(.init(code: "windows-name", severity: .warning,
+                                    message: "\(awkward.relativePath) uses characters Windows will not open. It copies and verifies correctly onto \(destination.label); only opening it later on a Windows PC is affected."))
             }
             if plan.files.contains(where: { $0.relativePath.utf8.count > 1_024 }) {
                 issues.append(.init(code: "path-too-long", severity: .blocking,
@@ -92,6 +86,20 @@ public struct TransferPreflightService: Sendable {
         }
         issues += collisionIssues(files: plan.files, destinations: plan.destinations)
         return PreflightResult(destinations: destinationChecks, issues: issues)
+    }
+
+    /// exFAT and FAT store these names byte-identical, and macOS writes them to
+    /// both formats without complaint — measured on freshly created images of
+    /// each. What refuses them is Windows, later, on another machine. That is a
+    /// portability caveat about a different operating system, not a fact about
+    /// whether this copy can be written and verified here, so it warns instead of
+    /// blocking: only the user knows whether the drive is bound for a PC.
+    private static func isAwkwardOnWindows(_ relativePath: String) -> Bool {
+        let forbidden = CharacterSet(charactersIn: "<>:\"\\|?*")
+        return relativePath.split(separator: "/").contains { component in
+            component.rangeOfCharacter(from: forbidden) != nil
+                || component.hasSuffix(".") || component.hasSuffix(" ")
+        }
     }
 
     private static func availableCapacity(at url: URL) -> Int64? {

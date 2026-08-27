@@ -98,8 +98,10 @@ recovery can reach a months-old transfer's roots after the last-used selections 
   disconnected drive is never presented as unverified.
 - Tests use swift-testing (`@Suite`/`@Test`/`#expect`), not XCTest.
 - Filesystem semantics differ by format — APFS/HFS+ support the same-volume atomic rename used for
-  finalization; exFAT has weaker durability and naming limits and is checked in preflight. Finalization
-  never assumes a cross-volume move works.
+  finalization; exFAT has weaker durability. Compare formats through `VolumeFormat`, never by matching
+  `VolumeIdentity.fileSystem` as a string: it holds a Disk Arbitration volume kind (`exfat`, `msdos`)
+  when Disk Arbitration resolved it and locale-dependent text (`MS-DOS (FAT32)`) when it did not.
+  Finalization never assumes a cross-volume move works.
 
 ## Docs
 

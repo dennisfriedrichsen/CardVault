@@ -62,13 +62,9 @@ public enum TimestampTolerance {
     /// for floating-point rounding through `Date`, not for the file system.
     public static let exact: TimeInterval = 0.000_01
 
+    /// The FAT family is exactly the set of formats Windows reads natively, so
+    /// this asks `VolumeFormat` rather than matching the name a second time.
     public static func forFileSystem(_ name: String) -> TimeInterval {
-        let lowered = name.lowercased()
-        let fatFamily = ["exfat", "fat32", "fat16", "msdos", "ms-dos"]
-        if fatFamily.contains(where: { lowered.contains($0) }) { return fatGranularity }
-        // A bare "fat" only counts as its own word: "fat" must not match inside
-        // an unrelated volume kind name.
-        let words = lowered.split { !$0.isLetter && !$0.isNumber }
-        return words.contains("fat") ? fatGranularity : exact
+        VolumeFormat(fileSystemDescription: name).isWindowsNative ? fatGranularity : exact
     }
 }
