@@ -111,7 +111,15 @@ final class AppModel {
         Task { try? await bookmarkStore.save(url: url, key: BookmarkKey.backup) }
         updatePreflight()
     }
-    func removeBackup() { backupURL = nil; updatePreflight() }
+    func removeBackup() {
+        backupURL = nil
+        backupAccess = nil
+        // Removing the backup has to outlive the window: the next refresh
+        // restores any empty selection from its saved bookmark, so leaving the
+        // bookmark behind puts back the destination the user just removed.
+        Task { try? await bookmarkStore.remove(key: BookmarkKey.backup) }
+        updatePreflight()
+    }
 
     func scan() {
         guard let sourceURL else { return }
