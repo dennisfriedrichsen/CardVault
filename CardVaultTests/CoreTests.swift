@@ -270,18 +270,65 @@ struct CoreTests {
         }
     }
 
-    @Test("exFAT-incompatible filenames are blocked")
-    func exFATName() throws {
+    /// The name is storable on exFAT and FAT alike, so the transfer must still be
+    /// allowed to start; only Windows would refuse to open it afterwards.
+    @Test("Windows-hostile filenames warn on FAT-family destinations without blocking",
+          arguments: ["exfat", "ExFAT", "msdos", "MS-DOS (FAT32)"])
+    func windowsNameWarning(fileSystem: String) throws {
         try withTemporaryDirectorySync { root in
             let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: destination) }
             let files = [SourceFile(relativePath: "DCIM/bad:name.jpg", byteCount: 1, mediaKind: .jpeg)]
             var plan = makePlan(source: root, destinations: [destination], files: files)
-            plan.destinations[0].volume.fileSystem = "exFAT"
+            plan.destinations[0].volume.fileSystem = fileSystem
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
-            #expect(result.issues.contains { $0.code == "exfat-name" })
+            #expect(result.issues.contains { $0.code == "windows-name" && $0.severity == .warning })
+            #expect(result.canProceed)
         }
+    }
+
+    @Test("Windows-hostile filenames are ignored on a destination Windows cannot read",
+          arguments: ["apfs", "APFS", "hfs", "Mac OS Extended"])
+    func windowsNameIgnoredOnMacFormats(fileSystem: String) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "DCIM/bad:name.jpg", byteCount: 1, mediaKind: .jpeg)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = fileSystem
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(!result.issues.contains { $0.code == "windows-name" })
+        }
+    }
+
+    /// Trailing dots and spaces are the half of the rule that is invisible in a
+    /// filename, so they are asserted separately from the punctuation set.
+    @Test("Trailing dots and spaces warn, ordinary camera names do not",
+          arguments: [("DCIM/clip.", true), ("DCIM/clip ", true),
+                      ("DCIM/100EOS_R/IMG_0433.CR3", false), ("PRIVATE/M4ROOT/CLIP/C0007.MP4", false)])
+    func windowsNameBoundaries(relativePath: String, warns: Bool) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: relativePath, byteCount: 1, mediaKind: .jpeg)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = "exfat"
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(result.issues.contains { $0.code == "windows-name" } == warns)
+        }
+    }
+
+    @Test("Volume formats resolve from both Disk Arbitration kinds and localized descriptions",
+          arguments: [("exfat", VolumeFormat.exfat), ("ExFAT", .exfat),
+                      ("msdos", .fat), ("MS-DOS (FAT32)", .fat), ("MS-DOS (FAT16)", .fat),
+                      ("apfs", .apfs), ("APFS", .apfs),
+                      ("hfs", .hfs), ("Mac OS Extended", .hfs),
+                      ("Network File System (NFS)", .other), ("Unknown", .other)])
+    func volumeFormatClassification(fileSystem: String, expected: VolumeFormat) {
+        #expect(VolumeIdentity(displayName: "V", fileSystem: fileSystem).format == expected)
     }
 
     @Test("SHA-256 matches the standard digest")
