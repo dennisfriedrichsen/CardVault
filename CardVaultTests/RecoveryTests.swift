@@ -42,6 +42,60 @@ struct RecoveryTests {
         }
     }
 
+    /// The failure mode CardVault exists to prevent: the transfer whose backup
+    /// did not finish must still be there at the next launch. `.safeToEject`
+    /// describes the card, so it belongs only in the record of a destination
+    /// that actually finished.
+    @Test("A destination that did not finish keeps its own state and is offered again")
+    func partiallySuccessfulTransferIsOfferedForRecovery() async throws {
+        try await withFixture(fileCount: 2, destinationCount: 2) { fixture in
+            // The backup drive refuses the second file aimed at it.
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "destination-1", after: 1, effect: .fail(.deviceFull))
+            ])
+            let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(injector: injector))
+                .execute(plan: fixture.plan)
+            #expect(outcome.state == .partiallySuccessful)
+            #expect(outcome.destinations[0].isVerified)
+            #expect(!outcome.destinations[1].isVerified)
+
+            // The primary finished, so its record says the card can go. The
+            // backup's record still says what happened to the backup.
+            #expect(try await fixture.finalManifest(0).state == .safeToEject)
+            #expect(try await fixture.finalManifest(1).state == .partiallySuccessful)
+
+            // And the unfinished backup can still be named, which is what
+            // history needs to report a connected drive as connected.
+            let staging = fixture.stagingRoot(1)
+            #expect(outcome.destinations[1].manifestURL == TransferLayout.manifestURL(inStaging: staging))
+            #expect(FileManager.default.fileExists(atPath: staging.path))
+
+            let scan = await fixture.coordinator().scan(destinationRoots: fixture.destinationRoots)
+            #expect(scan.transfers.count == 1)
+            let transfer = try #require(scan.transfers.first)
+            #expect(transfer.lastDurableState == .partiallySuccessful)
+            #expect(transfer.verifiedFiles < transfer.totalFiles)
+        }
+    }
+
+    /// A transfer where nothing verified is not a finished transfer either.
+    @Test("A transfer where every destination failed is still offered")
+    func failedTransferIsOffered() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "destination-", effect: .fail(.deviceFull), repeats: true)
+            ])
+            let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(injector: injector))
+                .execute(plan: fixture.plan)
+            #expect(outcome.state == .failed)
+            #expect(try await fixture.finalManifest(0).state == .failed)
+            let transfer = try #require(await fixture.coordinator()
+                .scan(destinationRoots: fixture.destinationRoots).transfers.first)
+            #expect(transfer.lastDurableState == .failed)
+            #expect(transfer.interruptedOperation == .finalizing)
+        }
+    }
+
     @Test("The durable state, progress, and failed operation are all presented")
     func presentsDurableProgress() async throws {
         try await withFixture(fileCount: 3) { fixture in

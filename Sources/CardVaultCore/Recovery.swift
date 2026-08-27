@@ -33,7 +33,9 @@ public enum InterruptedOperation: String, Sendable {
         case .copyComplete: self = .recordingCopyCompletion
         case .verifying: self = .verifyingFiles
         case .needsAttention: self = .awaitingConflictResolution
-        case .verified, .partiallySuccessful, .failed: self = .finalizing
+        // `.safeToEject` on a staging tree is a record an older build wrote
+        // over the outcome; the tree it describes never finished being moved.
+        case .verified, .partiallySuccessful, .failed, .safeToEject: self = .finalizing
         // Nothing went wrong here, and recovery saying "Unknown" about a
         // transfer the user deliberately stopped reads as a fault report.
         case .cancelled: self = .stoppedByUser
@@ -276,8 +278,11 @@ public actor RecoveryCoordinator {
                 guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
                 do {
                     let manifest = try await manifestStore.load(from: manifestURL)
-                    // An abandoned or finished transfer is a record, not an offer.
-                    guard manifest.abandonedAt == nil, manifest.state != .safeToEject else { continue }
+                    // An abandoned transfer is a record, not an offer. Nothing
+                    // else is tested here: this is a staging directory, and a
+                    // staging directory that still exists is by definition an
+                    // unfinished transfer, whatever state its manifest names.
+                    guard manifest.abandonedAt == nil else { continue }
                     found[manifest.transferID, default: []].append((root, staging, manifest))
                 } catch {
                     unreadable.append(UnreadableTransfer(
