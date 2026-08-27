@@ -5,11 +5,19 @@ import Testing
 /// Reproductions for the defects found in the security and correctness review.
 ///
 /// Each test asserts the behaviour the contracts in `Docs/` promise, so a failure
-/// here *is* the finding. They are expected to fail until the issues are fixed;
-/// each one should start passing as its fix lands, with no change to the test.
+/// here *is* the finding, and each one started failing before its fix existed.
+///
+/// A test here may still need editing once its fix lands, and #63 is why this no
+/// longer says otherwise. That fix refused a traversing path a layer earlier than
+/// the reproduction expected — on decode, so the record never becomes a transfer
+/// at all — which left the reproduction asking for a transfer that no longer
+/// exists. A fix stronger than the reproduction is the outcome to want; the test
+/// is then rewritten to assert the stronger behaviour, not treated as a
+/// regression. What must not change is the guarantee each test is about.
 ///
 /// - #59 `partiallySuccessfulTransferIsOfferedForRecovery`
-/// - #63 `forgedManifestCannotEscapeStagingTree`, `tamperedManifestCannotEscapeOnResume`
+/// - #63 `forgedManifestIsRefusedBeforeItIsOffered`,
+///   `abandonRefusesAPathOutsideTheStagingTree`, `tamperedManifestCannotEscapeOnResume`
 /// - #60 `resumeRechecksSkippedFiles`
 @Suite("Review findings")
 struct ReviewFindingTests {
@@ -72,8 +80,13 @@ struct ReviewFindingTests {
 
     // MARK: - #63 — path traversal via the manifest
 
-    @Test("A forged manifest cannot direct abandon-cleanup outside its own staging tree")
-    func forgedManifestCannotEscapeStagingTree() async throws {
+    /// The outer layer: a record whose path leads out of the transfer's tree is
+    /// refused when it is read, so it never becomes something the user can act on.
+    /// The traversal is the reason it is refused, not a decoding accident — the
+    /// user is told the record cannot be trusted, and specifically not told to go
+    /// and update CardVault, which is what an unsupported schema would mean.
+    @Test("A forged manifest is refused when it is read, not when it is acted on")
+    func forgedManifestIsRefusedBeforeItIsOffered() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "CVReviewB-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -86,15 +99,9 @@ struct ReviewFindingTests {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
 
         // A manifest an attacker (or corruption) wrote onto the destination drive.
-        let plan = TransferPlan(
-            name: "Forged", mode: .preserveCard, sourceRootPath: "/nonexistent",
-            sourceVolume: VolumeIdentity(displayName: "CARD", isRemovable: true),
-            files: [SourceFile(relativePath: "DCIM/decoy.CR3", byteCount: 1_024, mediaKind: .raw)],
-            destinations: [DestinationPlan(label: "Primary", rootPath: destination.path,
-                                           volume: VolumeIdentity(displayName: "destination-0"))])
+        let plan = forgedPlan(destination: destination)
         var forged = TransferManifest(plan: plan)
         forged.state = .copying
-        // Neither field is validated on decode.
         forged.files[0].relativeDestinationPath = "../../../irreplaceable.jpg"
         forged.files[0].destinations[plan.destinations[0].id]?.copyState = .copying
 
@@ -102,22 +109,103 @@ struct ReviewFindingTests {
         let staging = layout.stagingRoot(in: destination)
         try FileManager.default.createDirectory(at: TransferLayout.originalsRoot(inStaging: staging),
                                                 withIntermediateDirectories: true)
-        try await ManifestStore().save(forged, to: TransferLayout.manifestURL(inStaging: staging))
+        let manifestURL = TransferLayout.manifestURL(inStaging: staging)
+        try await ManifestStore().save(forged, to: manifestURL)
 
         let recovery = RecoveryCoordinator()
         let scan = await recovery.scan(destinationRoots: [destination])
-        let transfer = try #require(scan.transfers.first)
 
-        // Everything abandon offers to delete must live inside the staging tree.
-        let abandonPlan = recovery.abandonPlan(for: transfer)
+        #expect(scan.transfers.isEmpty, "a record that could escape its tree was offered for recovery")
+        let refused = try #require(scan.unreadable.first)
+        #expect(scan.unreadable.count == 1)
+        #expect(refused.manifestURL.standardizedFileURL == manifestURL.standardizedFileURL)
+        // Named so the user can see which record is untrustworthy and why.
+        #expect(refused.reason.contains("../../../irreplaceable.jpg"))
+        #expect(refused.reason.localizedCaseInsensitiveContains("outside"))
+        // Updating CardVault would not help and would misplace the blame.
+        #expect(!refused.isUnsupportedSchema)
+
+        // Refusing to read it is not enough on its own: nothing may have been
+        // touched on the way to that decision either.
+        #expect(FileManager.default.fileExists(atPath: victim.path),
+                "a file outside the transfer was deleted")
+    }
+
+    /// The inner layer, which the guarantee deliberately does not rest on decoding
+    /// alone. The manifest is handed to `abandonPlan` directly, because decode is
+    /// the outer layer and is exactly what this test has to get past to reach the
+    /// site that turns a recorded path into a deletion.
+    @Test("Abandon refuses a recorded path that leads outside the staging tree")
+    func abandonRefusesAPathOutsideTheStagingTree() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "CVReviewB2-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let victim = root.appending(path: "irreplaceable.jpg")
+        let victimBytes = Data(repeating: 0xAB, count: 1_024)
+        try victimBytes.write(to: victim)
+
+        let destination = root.appending(path: "destination-0")
+        let plan = forgedPlan(destination: destination)
+        let layout = TransferLayout(plan: plan)
+        let staging = layout.stagingRoot(in: destination)
+        let originals = TransferLayout.originalsRoot(inStaging: staging)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+
+        // One real partial artifact, and one record that walks out of the tree.
+        // The genuine one has to survive, or "refuses everything" would pass this.
+        let partial = originals.appending(path: "DCIM/decoy.CR3")
+        try FileManager.default.createDirectory(at: partial.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data(repeating: 0x01, count: 512).write(to: partial)
+
+        var manifest = TransferManifest(plan: plan)
+        manifest.state = .copying
+        manifest.files[0].destinations[plan.destinations[0].id]?.copyState = .copying
+        var escaping = manifest.files[0]
+        escaping.relativeSourcePath = "DCIM/escape.CR3"
+        escaping.relativeDestinationPath = "../../../irreplaceable.jpg"
+        manifest.files.append(escaping)
+
+        let manifestURL = TransferLayout.manifestURL(inStaging: staging)
+        let recovered = RecoverableTransfer(
+            manifest: manifest,
+            source: RecoveredSource(recordedVolume: plan.sourceVolume, root: nil,
+                                    match: .unavailable, bookmarkWasStale: false),
+            destinations: [RecoveredDestination(
+                id: plan.destinations[0].id, label: "Primary",
+                recordedVolume: plan.destinations[0].volume, root: destination,
+                stagingRoot: staging, manifestURL: manifestURL,
+                match: .indeterminate, bookmarkWasStale: false,
+                copiedFiles: 0, verifiedFiles: 0, conflictedFiles: 0)])
+
+        let recovery = RecoveryCoordinator()
+        let abandonPlan = recovery.abandonPlan(for: recovered)
+
+        #expect(abandonPlan.refusedPaths == ["Primary — ../../../irreplaceable.jpg"])
         for url in abandonPlan.removableIncompleteArtifacts {
             #expect(url.standardizedFileURL.path.hasPrefix(staging.standardizedFileURL.path + "/"),
                     "abandon would remove \(url.standardizedFileURL.path), outside \(staging.path)")
         }
+        // The artifact this transfer really did write is still offered, so the
+        // refusal is aimed at the escaping path and not at the whole record.
+        #expect(abandonPlan.removableIncompleteArtifacts.map(\.standardizedFileURL) == [partial.standardizedFileURL])
 
-        _ = await recovery.abandon(transfer, removingIncompleteArtifacts: true)
+        _ = await recovery.abandon(recovered, removingIncompleteArtifacts: true)
         #expect(FileManager.default.fileExists(atPath: victim.path),
                 "a file outside the transfer was deleted")
+        #expect(try Data(contentsOf: victim) == victimBytes, "a file outside the transfer was overwritten")
+        #expect(!FileManager.default.fileExists(atPath: partial.path),
+                "the transfer's own partial artifact was not removed")
+    }
+
+    private func forgedPlan(destination: URL) -> TransferPlan {
+        TransferPlan(
+            name: "Forged", mode: .preserveCard, sourceRootPath: "/nonexistent",
+            sourceVolume: VolumeIdentity(displayName: "CARD", isRemovable: true),
+            files: [SourceFile(relativePath: "DCIM/decoy.CR3", byteCount: 1_024, mediaKind: .raw)],
+            destinations: [DestinationPlan(label: "Primary", rootPath: destination.path,
+                                           volume: VolumeIdentity(displayName: "destination-0"))])
     }
 }
 
