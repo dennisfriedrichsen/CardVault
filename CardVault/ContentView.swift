@@ -263,13 +263,13 @@ private struct DestinationsCard: View {
     var body: some View {
         GroupBox("Destinations") {
             VStack(alignment: .leading, spacing: 10) {
-                Label(model.destinationURL?.lastPathComponent ?? "Choose primary", systemImage: "externaldrive")
-                    .accessibilityLabel("Primary destination: \(model.destinationURL?.lastPathComponent ?? "none chosen")")
+                destinationLabel(model.destinationURL, placeholder: "Choose primary", symbol: "externaldrive")
+                    .accessibilityLabel("Primary destination: \(model.destinationURL.map { model.pathLabel(for: $0) } ?? "none chosen")")
                 Button("Choose Primary…") { model.choosePrimary() }
                     .keyboardShortcut("d", modifiers: .command)
                 Divider()
-                Label(model.backupURL?.lastPathComponent ?? "No backup selected", systemImage: "externaldrive.badge.plus")
-                    .accessibilityLabel("Backup destination: \(model.backupURL?.lastPathComponent ?? "none chosen")")
+                destinationLabel(model.backupURL, placeholder: "No backup selected", symbol: "externaldrive.badge.plus")
+                    .accessibilityLabel("Backup destination: \(model.backupURL.map { model.pathLabel(for: $0) } ?? "none chosen")")
                 HStack {
                     Button("Choose Backup…") { model.chooseBackup() }
                         .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -281,6 +281,15 @@ private struct DestinationsCard: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity)
+    }
+
+    /// A full path is allowed to wrap rather than truncate: a path the user
+    /// cannot read to the end names the folder no better than the short name it
+    /// was turned on to replace.
+    private func destinationLabel(_ url: URL?, placeholder: String, symbol: String) -> some View {
+        Label(url.map { model.pathLabel(for: $0) } ?? placeholder, systemImage: symbol)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

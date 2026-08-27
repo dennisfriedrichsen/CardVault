@@ -30,6 +30,31 @@ final class AppModel {
     }
 
     @ObservationIgnored private var storedMode: TransferMode = .preserveCard
+
+    /// Persisted for the same reason the mode is: a display the user chose must
+    /// still be there next launch, because the ambiguity it resolves — several
+    /// folders sharing a name — is still there too.
+    var showsFullPaths: Bool {
+        get {
+            access(keyPath: \.showsFullPaths)
+            return storedShowsFullPaths
+        }
+        set {
+            withMutation(keyPath: \.showsFullPaths) { storedShowsFullPaths = newValue }
+            guard !isPosed else { return }
+            pathDisplayPreference.save(newValue)
+        }
+    }
+
+    @ObservationIgnored private var storedShowsFullPaths = false
+
+    /// How this launch names a folder on screen. Views ask the model rather than
+    /// reading a URL directly, so the setting cannot be honoured on one screen
+    /// and missed on another.
+    func pathLabel(for url: URL) -> String {
+        PathDisplay.label(for: url, showsFullPath: showsFullPaths)
+    }
+
     var scanResult: ScanResult?
     var preflight: PreflightResult?
     /// Copy and verification progress are tracked separately so a completed copy
@@ -110,6 +135,7 @@ final class AppModel {
     private let ejectionService: DiskEjectionService = DiskArbitrationEjectionService()
     private let bookmarkStore: SecurityScopedBookmarkStore
     @ObservationIgnored private let modePreference = TransferModePreference()
+    @ObservationIgnored private let pathDisplayPreference = FullPathDisplayPreference()
     private let historyStore: TransferHistoryStore
     private let recoveryCoordinator = RecoveryCoordinator()
     private let historyInspector = TransferHistoryInspector()
@@ -137,6 +163,7 @@ final class AppModel {
         // mode the app is not about to use, and so the scan `refresh()` starts
         // for a restored source runs in the mode the user last chose.
         storedMode = modePreference.load()
+        storedShowsFullPaths = pathDisplayPreference.load()
     }
 
     func chooseSource() {

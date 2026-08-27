@@ -25,3 +25,37 @@ public struct TransferModePreference {
         defaults.set(mode.rawValue, forKey: Self.key)
     }
 }
+
+/// Whether folders are named on screen by their full path rather than by their
+/// last path component alone. The short name is what the user recognizes, so it
+/// stays the default; but names are not unique, and a user with three folders
+/// called `tmp` cannot tell from the name which one a transfer will write to.
+public struct FullPathDisplayPreference {
+    private static let key = "showsFullPaths"
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    /// False when nothing is stored: the short name is the better default for
+    /// the common case of folders whose names already differ.
+    public func load() -> Bool { defaults.bool(forKey: Self.key) }
+
+    public func save(_ showsFullPaths: Bool) {
+        defaults.set(showsFullPaths, forKey: Self.key)
+    }
+}
+
+/// How a folder is named on screen. One definition, so every screen that names a
+/// folder answers the setting the same way: a screen that kept naming folders
+/// its own way would preserve the ambiguity the setting exists to remove.
+public enum PathDisplay {
+    public static func label(for url: URL, showsFullPath: Bool) -> String {
+        guard showsFullPath else { return url.lastPathComponent }
+        // Abbreviated at the home directory: `~/Pictures/tmp` separates that
+        // folder from every other `tmp` just as well as the absolute path does,
+        // and still fits the card it is shown in.
+        return (url.path as NSString).abbreviatingWithTildeInPath
+    }
+}

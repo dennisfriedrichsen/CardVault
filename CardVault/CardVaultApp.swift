@@ -15,7 +15,7 @@ struct CardVaultApp: App {
         .defaultSize(width: 1080, height: 720)
         .commands { CardVaultCommands(model: model) }
 
-        Settings { SettingsView() }
+        Settings { SettingsView(model: model) }
     }
 
     private static func makeModel() -> AppModel {
