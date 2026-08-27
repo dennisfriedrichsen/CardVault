@@ -13,7 +13,23 @@ final class AppModel {
     var destinationURL: URL?
     var backupURL: URL?
     var transferName = ""
-    var mode: TransferMode = .preserveCard
+    /// The mode outlives the launch it was chosen in, like the destination
+    /// selections do. Written through on every change rather than at quit, so a
+    /// crash or a force-quit cannot lose the choice. A posed model never writes:
+    /// a reference capture must not change the user's preferences.
+    var mode: TransferMode {
+        get {
+            access(keyPath: \.mode)
+            return storedMode
+        }
+        set {
+            withMutation(keyPath: \.mode) { storedMode = newValue }
+            guard !isPosed else { return }
+            modePreference.save(newValue)
+        }
+    }
+
+    @ObservationIgnored private var storedMode: TransferMode = .preserveCard
     var scanResult: ScanResult?
     var preflight: PreflightResult?
     /// Copy and verification progress are tracked separately so a completed copy
@@ -93,6 +109,7 @@ final class AppModel {
     private let volumeDiscovery = VolumeDiscoveryService()
     private let ejectionService: DiskEjectionService = DiskArbitrationEjectionService()
     private let bookmarkStore: SecurityScopedBookmarkStore
+    @ObservationIgnored private let modePreference = TransferModePreference()
     private let historyStore: TransferHistoryStore
     private let recoveryCoordinator = RecoveryCoordinator()
     private let historyInspector = TransferHistoryInspector()
@@ -116,6 +133,10 @@ final class AppModel {
             .appending(path: "CardVault", directoryHint: .isDirectory)
         bookmarkStore = SecurityScopedBookmarkStore(storageURL: support.appending(path: "bookmarks.plist"))
         historyStore = TransferHistoryStore(url: support.appending(path: "transfer-history.json"))
+        // Restored here rather than in `refresh()` so the picker never shows a
+        // mode the app is not about to use, and so the scan `refresh()` starts
+        // for a restored source runs in the mode the user last chose.
+        storedMode = modePreference.load()
     }
 
     func chooseSource() {
