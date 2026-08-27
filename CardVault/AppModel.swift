@@ -82,18 +82,23 @@ final class AppModel {
     }
 
     func chooseSource() {
-        guard let url = chooseFolder(prompt: "Choose Source") else { return }
+        guard let url = chooseFolder(prompt: "Choose Source",
+                                     initialDirectory: sourceURL ?? detectedVolumes.first?.url) else { return }
         selectSource(url)
     }
 
     func choosePrimary() {
-        destinationURL = chooseFolder(prompt: "Choose Primary Destination")
-        if let destinationURL { Task { try? await bookmarkStore.save(url: destinationURL, key: BookmarkKey.primary) } }
+        guard let url = chooseFolder(prompt: "Choose Primary Destination",
+                                     initialDirectory: destinationURL ?? Self.defaultDestinationDirectory) else { return }
+        destinationURL = url
+        Task { try? await bookmarkStore.save(url: url, key: BookmarkKey.primary) }
         updatePreflight()
     }
     func chooseBackup() {
-        backupURL = chooseFolder(prompt: "Choose Backup Destination")
-        if let backupURL { Task { try? await bookmarkStore.save(url: backupURL, key: BookmarkKey.backup) } }
+        guard let url = chooseFolder(prompt: "Choose Backup Destination",
+                                     initialDirectory: backupURL ?? destinationURL ?? Self.defaultDestinationDirectory) else { return }
+        backupURL = url
+        Task { try? await bookmarkStore.save(url: url, key: BookmarkKey.backup) }
         updatePreflight()
     }
     func removeBackup() { backupURL = nil; updatePreflight() }
@@ -199,6 +204,10 @@ final class AppModel {
         // Detecting a card is not selecting one: the status says a card is there
         // and waits, because reading it needs the user's permission first.
         guard sourceURL == nil, !isWorking else { return }
+        // Ejecting unmounts the card, and the notification that follows must not
+        // wipe out the confirmation the user just asked for. Another card
+        // arriving does supersede it: there is something to do again.
+        guard status != .ejected || !detectedVolumes.isEmpty else { return }
         setStatus(detectedVolumes.isEmpty ? .noSource : .sourceDetected)
     }
 
@@ -230,7 +239,8 @@ final class AppModel {
         Task {
             do {
                 try await ejectionService.eject(volumeAt: sourceURL)
-                setStatus(.safeToEject, message: "\(name) ejected")
+                await resetAfterEjection()
+                setStatus(.ejected, message: "\(name) ejected — ready for the next transfer")
             } catch let error as VolumeEjectionError {
                 errorMessage = [error.errorDescription, error.recoverySuggestion].compactMap { $0 }.joined(separator: " ")
                 setStatus(.needsAttention, message: "\(error.volumeName) is still mounted")
@@ -239,6 +249,29 @@ final class AppModel {
             }
             isWorking = false
         }
+    }
+
+    /// The card is out. Everything on screen described it — its scan, its
+    /// preflight, its progress, its outcome — and leaving that up invites the
+    /// next transfer to be aimed at a volume that is no longer mounted. The
+    /// finished run is not lost: it was recorded in History before the eject was
+    /// offered. The destinations stay, because those are a standing choice
+    /// rather than part of the transfer that just ended.
+    private func resetAfterEjection() async {
+        sourceAccess = nil
+        sourceURL = nil
+        sourceVolume = nil
+        scanResult = nil
+        preflight = nil
+        copyProgress = nil
+        verificationProgress = nil
+        isFinalizing = false
+        outcome = nil
+        transferName = Self.defaultTransferName()
+        // Restoring the last source on the next refresh would put the card that
+        // was just ejected straight back on the screen.
+        try? await bookmarkStore.remove(key: BookmarkKey.lastSource)
+        detectedVolumes = await volumeDiscovery.mountedVolumes().filter { $0.identity.isRemovable }
     }
 
     // MARK: - Transfer history
@@ -543,6 +576,13 @@ final class AppModel {
         errorMessage = "\(operation) failed: \(error.localizedDescription). The source was not modified. You can inspect the incomplete destination and try again."
         setStatus(.needsAttention)
     }
+
+    /// Every picker names its own starting directory. `NSOpenPanel` otherwise
+    /// reopens wherever the last panel left off, so choosing a destination
+    /// started on the card the user had just picked as the source.
+    static let defaultDestinationDirectory = FileManager.default
+        .urls(for: .picturesDirectory, in: .userDomainMask).first
+        ?? URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
 
     static func defaultTransferName() -> String {
         Date.now.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))

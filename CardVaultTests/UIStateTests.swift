@@ -83,7 +83,7 @@ struct UIStatePresentationTests {
     @Test("Only fully verified states carry the success tone")
     func successToneIsEarned() {
         let successes = PrincipalUIState.allCases.filter { StatusPresentation.for($0).tone == .success }
-        #expect(Set(successes) == Set([.verified, .safeToEject]))
+        #expect(Set(successes) == Set([.verified, .safeToEject, .ejected]))
         #expect(StatusPresentation.for(.primaryVerifiedBackupIncomplete).tone == .attention)
     }
 
@@ -113,6 +113,26 @@ struct UIStateFixtureTests {
         for fixture in UIStateFixture.all {
             #expect(fixture.presentation.state == fixture.state)
         }
+    }
+
+    /// Ejecting ends the transfer the screen was describing. Anything still
+    /// shown would describe a card that is no longer mounted.
+    @Test("The ejected fixture keeps the destinations and nothing about the card")
+    func ejectedFixtureIsCleared() {
+        let ejected = UIStateFixture.fixture(for: .ejected)
+        #expect(ejected.sourceVolume == nil)
+        #expect(ejected.sourcePath == nil)
+        #expect(ejected.scan == nil)
+        #expect(ejected.preflight == nil)
+        #expect(ejected.copyProgress == nil)
+        #expect(ejected.verificationProgress == nil)
+        #expect(ejected.outcome == nil)
+        #expect(ejected.detectedVolumes.isEmpty)
+        #expect(!ejected.isWorking)
+        // The destinations are the user's standing choice, not the finished
+        // transfer's, so they survive the card leaving.
+        #expect(ejected.destinationName != nil)
+        #expect(ejected.backupName != nil)
     }
 
     @Test("Fixtures are deterministic, so two captures differ only if the UI did")
