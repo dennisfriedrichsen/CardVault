@@ -99,7 +99,13 @@ that sheet *is* the state a user meets it in.
     Bars now carry "*n* percent, *x* of *y* files", the copy/verify bar honours
     `accessibilityReduceMotion`, and the indeterminate scan spinner is replaced
     by the word "Scanning…" under reduced motion.
-13. **Half the keyboard paths existed only on toolbar buttons.** Menu items were
+13. **Source, name, mode and destinations stayed editable during a transfer.**
+    The running coordinator holds the plan it was started with, so an edit made
+    mid-transfer changed only the screen — the name field could read one thing
+    while a differently named folder was being written. Those three cards, the
+    toolbar's Choose Source, and the three Choose… menu items are now disabled
+    while an operation runs, with the reason written beneath the cards.
+14. **Half the keyboard paths existed only on toolbar buttons.** Menu items were
     added for every shortcut (see below), so they are discoverable and reachable
     from the menu bar.
 
