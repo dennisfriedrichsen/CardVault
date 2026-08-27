@@ -85,6 +85,12 @@ extension UIStateFixture {
         case .safeToEject:
             return base(state, copyProgress: copyCompleteProgress, verificationProgress: verifiedProgress,
                         outcome: verifiedOutcome)
+        // The card is gone, so everything that described it is gone with it. The
+        // destinations stay: they are the user's standing choice, not the
+        // finished transfer's.
+        case .ejected:
+            return base(state, sourceVolume: nil, sourcePath: nil, scan: nil, preflight: nil,
+                        detectedVolumes: [])
         }
     }
 

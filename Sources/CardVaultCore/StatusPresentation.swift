@@ -28,6 +28,7 @@ public enum PrincipalUIState: String, CaseIterable, Sendable {
     case needsAttention
     case failed
     case safeToEject
+    case ejected
 }
 
 /// How urgent a status is. Tone reaches the view as colour *only*; the symbol and
@@ -235,6 +236,16 @@ extension StatusPresentation {
                 symbolName: "eject.fill",
                 tone: .success,
                 announcement: "Safe to eject. Safe to eject does not mean safe to erase.")
+        case .ejected:
+            StatusPresentation(
+                state: state,
+                // The card is out and its transfer is recorded, so this screen
+                // is the start of the next transfer, not the end of the last.
+                title: "Card ejected — ready for the next transfer",
+                detail: "The transfer's record is in History. The card was left exactly as it was found.",
+                symbolName: "eject.circle.fill",
+                tone: .success,
+                announcement: "Card ejected. Ready for the next transfer. The transfer's record is in History, and the card was left exactly as it was found.")
         }
     }
 }

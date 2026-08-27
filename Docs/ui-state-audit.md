@@ -48,6 +48,7 @@ Each state links its light capture; the dark capture is the same name with
 | `needsAttention` | [png](ui-states/needsAttention-light.png) | `exclamationmark.circle.fill` | attention | Transfer needs attention… |
 | `failed` | [png](ui-states/failed-light.png) | `xmark.octagon.fill` | blocked | Transfer failed. No destination was verified… |
 | `safeToEject` | [png](ui-states/safeToEject-light.png) | `eject.fill` | success | Safe to eject. Safe to eject does not mean safe to erase. |
+| `ejected` | [png](ui-states/ejected-light.png) | `eject.circle.fill` | success | Card ejected. Ready for the next transfer… |
 
 `interrupted` is captured as the relaunch recovery sheet over the window, because
 that sheet *is* the state a user meets it in.
@@ -111,6 +112,12 @@ that sheet *is* the state a user meets it in.
   genuinely safe to remove — the source is never written to — and both the
   status header and the result state that a destination is unverified. Finding 11
   covers the consequence.
+- **`ejected` clears the screen the finished transfer left behind.** Source,
+  scan, preflight, progress and outcome all described a card that is no longer
+  mounted, so they go; the record of the run stays in History, and the chosen
+  destinations stay because they outlive any one transfer. The confirmation
+  holds until another card is detected rather than being wiped by the unmount it
+  caused.
 - **The disabled prominent `Start Transfer` button stays visibly blue** in dark
   mode. That is the system's own disabled styling for `.borderedProminent`; the
   reason line beneath it carries the meaning.

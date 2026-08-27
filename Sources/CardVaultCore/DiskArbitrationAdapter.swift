@@ -87,28 +87,20 @@ public struct VolumeEjectionError: LocalizedError, Hashable, Sendable {
 
 /// Unmounts every partition of the card's physical device and then ejects the device.
 public struct DiskArbitrationEjectionService: DiskEjectionService {
-    private static let callbackQueue = DispatchQueue(label: "com.cardvault.disk-arbitration.callbacks")
-    private static let requestQueue = DispatchQueue(label: "com.cardvault.disk-arbitration.requests")
+    private static let callbackQueue = DispatchQueue(label: "com.cardvault.disk-arbitration.callbacks",
+                                                     qos: .userInitiated)
 
     public init() {}
 
     public func eject(volumeAt url: URL) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let path = url.standardizedFileURL
-            Self.requestQueue.async {
-                continuation.resume(with: Result { try Self.ejectBlocking(volumeAt: path) })
-            }
-        }
-    }
-
-    private static func ejectBlocking(volumeAt url: URL) throws {
+        let url = url.standardizedFileURL
         let name = url.lastPathComponent
         func failure(_ reason: VolumeEjectionError.Reason) -> VolumeEjectionError {
             VolumeEjectionError(volumeName: name, volumePath: url.path, reason: reason)
         }
 
         guard let session = DASessionCreate(kCFAllocatorDefault) else { throw failure(.sessionUnavailable) }
-        DASessionSetDispatchQueue(session, callbackQueue)
+        DASessionSetDispatchQueue(session, Self.callbackQueue)
         defer { DASessionSetDispatchQueue(session, nil) }
 
         guard let volumeDisk = DADiskCreateFromVolumePath(kCFAllocatorDefault, session, url as CFURL) else {
@@ -120,26 +112,26 @@ public struct DiskArbitrationEjectionService: DiskEjectionService {
         let removable = description[kDADiskDescriptionMediaRemovableKey as String] as? Bool ?? false
         guard ejectable || removable else { throw failure(.notEjectable) }
 
-        if let dissent = perform(request: { context in
+        if let dissent = await Self.perform(request: { context in
             DADiskUnmount(wholeDisk, DADiskUnmountOptions(kDADiskUnmountOptionWhole), unmountCallback, context)
         }) {
             throw failure(dissent.status == DAReturn(kDAReturnBusy) ? .busy(dissent.message) : .unmountFailed(dissent.message))
         }
 
-        if let dissent = perform(request: { context in
+        if let dissent = await Self.perform(request: { context in
             DADiskEject(wholeDisk, DADiskEjectOptions(kDADiskEjectOptionDefault), ejectCallback, context)
         }) {
             throw failure(.ejectFailed(dissent.message))
         }
     }
 
-    /// Issues one Disk Arbitration request and blocks the request queue until its callback lands
-    /// on the (separate) callback queue. Returns the dissenter, if any.
-    private static func perform(request: (UnsafeMutableRawPointer) -> Void) -> Dissent? {
-        let box = DissentBox()
-        request(Unmanaged.passRetained(box).toOpaque())
-        box.wait()
-        return box.dissent
+    /// Issues one Disk Arbitration request and suspends until its callback lands on the callback
+    /// queue. Nothing blocks a thread: a semaphore here would park the caller's user-initiated
+    /// thread on the callback queue and invert priorities.
+    private static func perform(request: (UnsafeMutableRawPointer) -> Void) async -> Dissent? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Dissent?, Never>) in
+            request(Unmanaged.passRetained(DissentBox(continuation)).toOpaque())
+        }
     }
 }
 
@@ -149,18 +141,17 @@ private struct Dissent: Sendable {
 }
 
 private final class DissentBox: @unchecked Sendable {
-    private let semaphore = DispatchSemaphore(value: 0)
-    private(set) var dissent: Dissent?
+    private let continuation: CheckedContinuation<Dissent?, Never>
 
-    func complete(_ dissenter: DADissenter?) {
-        if let dissenter {
-            dissent = Dissent(status: DADissenterGetStatus(dissenter),
-                              message: DADissenterGetStatusString(dissenter) as String?)
-        }
-        semaphore.signal()
+    init(_ continuation: CheckedContinuation<Dissent?, Never>) {
+        self.continuation = continuation
     }
 
-    func wait() { semaphore.wait() }
+    func complete(_ dissenter: DADissenter?) {
+        continuation.resume(returning: dissenter.map {
+            Dissent(status: DADissenterGetStatus($0), message: DADissenterGetStatusString($0) as String?)
+        })
+    }
 }
 
 private let unmountCallback: DADiskUnmountCallback = { _, dissenter, context in
