@@ -30,6 +30,34 @@ public enum FileSystemError: Error, Equatable, Sendable {
     case sourceChanged(String)
 }
 
+/// These reach the user through `localizedDescription`, so every case says what
+/// happened in a sentence. Without this a failure renders as "FileSystemError
+/// error 7", which tells the user nothing about whether their files are safe.
+extension FileSystemError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .injected(let operation, let name):
+            "A simulated \(operation) fault stopped work on \(name)"
+        case .disconnected(let operation, let name):
+            "The volume disconnected during \(operation) of \(name)"
+        case .permissionDenied(let operation, let name):
+            "CardVault was not allowed to \(operation) \(name)"
+        case .destinationFull(let name):
+            "The destination ran out of space writing \(name)"
+        case .shortRead(let name, let bytesRead):
+            "Reading \(name) ended early after \(bytesRead.formatted(.byteCount(style: .file)))"
+        case .shortWrite(let name, let bytesWritten):
+            "Writing \(name) ended early after \(bytesWritten.formatted(.byteCount(style: .file)))"
+        case .unexpectedEndOfFile(let name):
+            "\(name) ended sooner than its recorded size"
+        case .existingConflict(let path):
+            "\(path) already exists, and CardVault never overwrites existing content"
+        case .sourceChanged(let name):
+            "\(name) changed on the card while it was being read"
+        }
+    }
+}
+
 extension FaultKind {
     func error(operation: FileSystemOperation, url: URL) -> FileSystemError {
         switch self {
