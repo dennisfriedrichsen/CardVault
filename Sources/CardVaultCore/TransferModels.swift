@@ -3,13 +3,11 @@ import Foundation
 public enum TransferMode: String, Codable, CaseIterable, Sendable {
     case preserveCard
     case mediaOnly
-    case customDestination
 
     public var title: String {
         switch self {
         case .preserveCard: "Preserve Card"
         case .mediaOnly: "Media Only"
-        case .customDestination: "Custom Destination"
         }
     }
 }
