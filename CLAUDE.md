@@ -101,7 +101,9 @@ recovery can reach a months-old transfer's roots after the last-used selections 
   finalization; exFAT has weaker durability. Compare formats through `VolumeFormat`, never by matching
   `VolumeIdentity.fileSystem` as a string: it holds a Disk Arbitration volume kind (`exfat`, `msdos`)
   when Disk Arbitration resolved it and locale-dependent text (`MS-DOS (FAT32)`) when it did not.
-  Finalization never assumes a cross-volume move works.
+  Finalization never assumes a cross-volume move works. Case sensitivity is not a format at all —
+  APFS and HFS+ each come in both variants — so it is measured at the destination mount rather than
+  inferred from either the kind or the label.
 
 ## Docs
 

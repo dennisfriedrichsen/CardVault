@@ -26,23 +26,37 @@ public struct TransferPreflightService: Sendable {
     public var safetyMarginBytes: Int64
     private let capacityProvider: @Sendable (URL) -> Int64?
     private let readabilityProvider: @Sendable (URL) -> Bool
+    /// Whether a destination keeps two names that differ only in case as two
+    /// files. Nil when the mount will not say.
+    private let caseSensitivityProvider: @Sendable (URL) -> Bool?
 
     public init(safetyMarginBytes: Int64 = 1_073_741_824) {
         self.safetyMarginBytes = safetyMarginBytes
         capacityProvider = Self.availableCapacity
         readabilityProvider = Self.isReadable
+        caseSensitivityProvider = Self.supportsCaseSensitiveNames
     }
 
-    /// Both probes are injectable so that `validate` can be run as a pure
+    /// Every probe is injectable so that `validate` can be run as a pure
     /// function of a plan. That is what lets the UI fixtures derive their
     /// preflight results from the real check rather than hand-writing issues
     /// that no code path produces.
     init(safetyMarginBytes: Int64 = 1_073_741_824,
          capacityProvider: @escaping @Sendable (URL) -> Int64?,
-         readabilityProvider: @escaping @Sendable (URL) -> Bool = Self.isReadable) {
+         readabilityProvider: @escaping @Sendable (URL) -> Bool = Self.isReadable,
+         caseSensitivityProvider: @escaping @Sendable (URL) -> Bool? = Self.supportsCaseSensitiveNames) {
         self.safetyMarginBytes = safetyMarginBytes
         self.capacityProvider = capacityProvider
         self.readabilityProvider = readabilityProvider
+        self.caseSensitivityProvider = caseSensitivityProvider
+    }
+
+    init(safetyMarginBytes: Int64 = 1_073_741_824,
+         caseSensitivityProvider: @escaping @Sendable (URL) -> Bool?) {
+        self.safetyMarginBytes = safetyMarginBytes
+        capacityProvider = Self.availableCapacity
+        readabilityProvider = Self.isReadable
+        self.caseSensitivityProvider = caseSensitivityProvider
     }
 
     public func validate(_ plan: TransferPlan) -> PreflightResult {
@@ -186,13 +200,27 @@ public struct TransferPreflightService: Sendable {
         return nil
     }
 
+    /// Two source names that differ only in case become one file on a
+    /// case-insensitive destination, so one photograph would silently stand in
+    /// for two. The question is asked of the mount itself: case sensitivity is
+    /// not something the volume kind reports — APFS and HFS+ each come in both
+    /// variants — and a mount that will not answer is treated as insensitive,
+    /// because refusing a transfer that would have worked costs less than
+    /// finalising one file where the card held two.
     private func collisionIssues(files: [SourceFile], destinations: [DestinationPlan]) -> [PreflightIssue] {
         let folded = Dictionary(grouping: files, by: { $0.relativePath.folding(options: [.caseInsensitive], locale: nil) })
-        guard folded.values.contains(where: { Set($0.map(\.relativePath)).count > 1 }) else { return [] }
-        if destinations.contains(where: { !$0.volume.fileSystem.lowercased().contains("case-sensitive") }) {
-            return [.init(code: "case-collision", severity: .blocking,
-                          message: "Source paths collide on a case-insensitive destination filesystem.")]
+        guard let colliding = folded.values.first(where: { Set($0.map(\.relativePath)).count > 1 }) else { return [] }
+        let insensitive = destinations.filter {
+            caseSensitivityProvider(URL(filePath: $0.rootPath, directoryHint: .isDirectory)) != true
         }
-        return []
+        guard !insensitive.isEmpty else { return [] }
+        let names = Set(colliding.map(\.relativePath)).sorted()
+        return [.init(code: "case-collision", severity: .blocking,
+                      message: "\(names[0]) and \(names[1]) differ only in case, and \(insensitive.map(\.label).joined(separator: " and ")) would store them as one file. Copy them separately, or choose a destination that keeps names differing only in case apart.")]
+    }
+
+    /// Measured at the destination root rather than inferred from its label.
+    private static func supportsCaseSensitiveNames(at url: URL) -> Bool? {
+        (try? url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames
     }
 }

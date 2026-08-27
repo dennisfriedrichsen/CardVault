@@ -265,8 +265,52 @@ struct CoreTests {
             let files = [SourceFile(relativePath: "A.JPG", byteCount: 1, mediaKind: .jpeg),
                          SourceFile(relativePath: "a.jpg", byteCount: 1, mediaKind: .jpeg)]
             let plan = makePlan(source: root, destinations: [destination], files: files)
+            // The real mount is asked here: the temporary directory lives on a
+            // case-insensitive volume, so this exercises the measurement itself.
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
-            #expect(result.issues.contains { $0.code == "case-collision" })
+            let issue = try #require(result.issues.first { $0.code == "case-collision" })
+            #expect(issue.severity == .blocking)
+            // The message names the pair and the destination rather than asserting
+            // something the user cannot check.
+            #expect(issue.message.contains("A.JPG") && issue.message.contains("a.jpg"))
+            #expect(issue.message.contains("Primary"))
+        }
+    }
+
+    /// The volume kind never spells out case sensitivity — APFS and HFS+ each
+    /// come in both variants — so a destination that can hold both spellings
+    /// must not be refused on the strength of its label.
+    @Test("A case-sensitive destination is allowed to store both spellings")
+    func caseCollisionAllowedOnCaseSensitiveDestination() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "IMG_001.JPG", byteCount: 1, mediaKind: .jpeg),
+                         SourceFile(relativePath: "img_001.jpg", byteCount: 1, mediaKind: .jpeg)]
+            let plan = makePlan(source: root, destinations: [destination], files: files)
+            let result = TransferPreflightService(safetyMarginBytes: 0) { url in
+                #expect(url.standardizedFileURL.path == destination.standardizedFileURL.path)
+                return true
+            }.validate(plan)
+            #expect(!result.issues.contains { $0.code == "case-collision" })
+            #expect(result.canProceed)
+        }
+    }
+
+    /// A mount that will not answer is treated as case-insensitive: a wrong
+    /// refusal is recoverable, one file standing in for two is not.
+    @Test("A destination that cannot report case sensitivity still blocks a collision")
+    func caseCollisionBlocksWhenSensitivityUnknown() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "A.JPG", byteCount: 1, mediaKind: .jpeg),
+                         SourceFile(relativePath: "a.jpg", byteCount: 1, mediaKind: .jpeg)]
+            let plan = makePlan(source: root, destinations: [destination], files: files)
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in nil }.validate(plan)
+            #expect(result.issues.contains { $0.code == "case-collision" && $0.severity == .blocking })
         }
     }
 
