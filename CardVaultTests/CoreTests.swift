@@ -321,6 +321,57 @@ struct CoreTests {
         }
     }
 
+    /// The limit is exact and hard: 4294967295 bytes is the largest file FAT can
+    /// hold, and free space does not enter into it — a 6 GB FAT32 image refuses a
+    /// 4 GiB file. Sizes are posed rather than written so the test needs no media.
+    @Test("A file at or over 4 GiB blocks a FAT destination",
+          arguments: [("msdos", Int64(4_294_967_296), true),
+                      ("MS-DOS (FAT32)", Int64(4_294_967_296), true),
+                      ("MS-DOS (FAT16)", Int64(5_368_709_120), true),
+                      ("msdos", Int64(4_294_967_295), false),
+                      ("exfat", Int64(8_589_934_592), false),
+                      ("APFS", Int64(8_589_934_592), false)])
+    func fatFileSizeLimit(fileSystem: String, byteCount: Int64, blocks: Bool) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "PRIVATE/M4ROOT/CLIP/C0007.MP4",
+                                    byteCount: byteCount, mediaKind: .video)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = fileSystem
+            // Ample free space, so only the format's own cap can be the reason.
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 1_000_000_000_000 }.validate(plan)
+            let blocked = result.issues.contains { $0.code == "file-too-large" && $0.severity == .blocking }
+            #expect(blocked == blocks)
+            #expect(result.canProceed == !blocks)
+        }
+    }
+
+    @Test("The blocking message names the offending file")
+    func fatFileSizeLimitNamesFile() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "DCIM/small.JPG", byteCount: 1_000, mediaKind: .jpeg),
+                         SourceFile(relativePath: "CLIP/C0007.MP4", byteCount: 5_368_709_120, mediaKind: .video)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = "msdos"
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 1_000_000_000_000 }.validate(plan)
+            let issue = try #require(result.issues.first { $0.code == "file-too-large" })
+            #expect(issue.message.contains("CLIP/C0007.MP4"))
+        }
+    }
+
+    @Test("Only FAT caps a file's size")
+    func maximumFileSizeByFormat() {
+        #expect(VolumeFormat.fat.maximumFileSize == 4_294_967_295)
+        for format in [VolumeFormat.exfat, .apfs, .hfs, .other] {
+            #expect(format.maximumFileSize == nil)
+        }
+    }
+
     @Test("Volume formats resolve from both Disk Arbitration kinds and localized descriptions",
           arguments: [("exfat", VolumeFormat.exfat), ("ExFAT", .exfat),
                       ("msdos", .fat), ("MS-DOS (FAT32)", .fat), ("MS-DOS (FAT16)", .fat),

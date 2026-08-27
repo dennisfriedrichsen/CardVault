@@ -76,6 +76,11 @@ public struct TransferPreflightService: Sendable {
                 issues.append(.init(code: "windows-name", severity: .warning,
                                     message: "\(awkward.relativePath) uses characters Windows will not open. It copies and verifies correctly onto \(destination.label); only opening it later on a Windows PC is affected."))
             }
+            if let maximum = destination.volume.format.maximumFileSize,
+               let oversized = plan.files.first(where: { $0.byteCount > maximum }) {
+                issues.append(.init(code: "file-too-large", severity: .blocking,
+                                    message: "\(oversized.relativePath) is \(oversized.byteCount.formatted(.byteCount(style: .file))), and \(destination.label) is FAT-formatted, which cannot store a file of 4 GB or more however much space is free. Reformat \(destination.label) as exFAT or APFS, or choose another destination."))
+            }
             if plan.files.contains(where: { $0.relativePath.utf8.count > 1_024 }) {
                 issues.append(.init(code: "path-too-long", severity: .blocking,
                                     message: "A destination path exceeds CardVault's safe path-length limit."))
