@@ -39,3 +39,17 @@ from SwiftUI from the first source file.
 - Only an artifact durably recorded as `copying` or `failed` may be removed for a whole-file retry.
 - Portable manifests contain relative paths and public volume identity, never bookmark bytes or assumed mount paths.
 - “Safe to eject” follows handle closure and durable persistence; it never means safe to erase.
+
+## Divergences from the originating specification
+
+`Docs/prompt.txt` is the originating specification and is left as written; where the shipped app
+departs from it, the departure is recorded here rather than by editing the spec after the fact.
+
+- **Custom Destination transfer mode (`prompt.txt` "Custom Destination").** Not shipped. The mode
+  described copying "into an existing user-selected folder without imposing a proprietary library
+  structure", but every mode already copies into a folder the user chose, and every mode creates the
+  same `.<name>.cardvault-incomplete-<UUID>/Originals` tree. The engine made no distinction: the case
+  was consulted only by the Media Only exclusion test in `Scanning.swift`, so a Custom Destination
+  transfer produced byte-for-byte the same scan set, layout, and manifest as Preserve Card. A mode
+  naming a difference the engine does not make invites the user to believe they have changed where
+  their files land when they have not, so `TransferMode` offers two modes.

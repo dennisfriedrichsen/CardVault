@@ -109,6 +109,8 @@ recovery can reach a months-old transfer's roots after the last-used selections 
 
 `ui-state-audit.md` is the accessibility and layout audit of the principal UI states, with
 `Docs/ui-states/` as its reference screenshots and `ui-state-capture.md` as the one command that
-regenerates them. Changing anything the user sees means re-running that capture and reviewing the
-diff. The states themselves are named in `StatusPresentation.swift` and posed by
+regenerates them. The capture is audit equipment, not a per-change chore: re-run it when actually
+auditing the UI, not on every change or PR that happens to touch a view. The screenshots are evidence
+for the audit's prose; no test reads them, so a stale row in a picker costs nothing until the next
+audit reads it. The states themselves are named in `StatusPresentation.swift` and posed by
 `UIStateFixtures.swift`; a new user-visible state belongs in both, or it drops out of the audit.

@@ -38,9 +38,9 @@ saved for later launches with a security-scoped bookmark.
 
 ## Transfer behavior
 
-Preserve Card (default) retains the complete structure. Media Only copies recognized RAW, JPEG,
-HEIF/HEIC, TIFF, PNG, camera video, and XMP sidecars while preserving relative folders and disclosing
-exclusions. Custom Destination copies into the chosen folder without a proprietary library.
+Two modes. Preserve Card (default) retains the complete structure. Media Only copies recognized RAW,
+JPEG, HEIF/HEIC, TIFF, PNG, camera video, and XMP sidecars while preserving relative folders and
+disclosing exclusions. Both copy into the folder the user chose.
 
 New transfers use `.<name>.cardvault-incomplete-<UUID>/Originals` until completion. Existing final or
 unrelated files are not overwritten. Source SHA-256 is recorded, every destination copy is closed and
