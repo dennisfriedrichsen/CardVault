@@ -43,6 +43,31 @@ final class AppModel {
     }
     var errorMessage: String?
 
+    /// True from the moment the user asks to stop until the coordinator has
+    /// finished unwinding. It gates the stop control and keeps late progress
+    /// ticks from talking over the header.
+    private(set) var isCancelling = false
+
+    /// Why the running transfer cannot be stopped right now, or nil when it can.
+    /// A control that is merely greyed out teaches the user nothing about a
+    /// transfer they are trying to get out of.
+    var stopUnavailableReason: String? {
+        if !showsStopControl { return "No transfer is running." }
+        if isCancelling { return "CardVault is already stopping this transfer." }
+        if isFinalizing {
+            return "The transfer is being finalized. Stopping now would leave the destinations half-recorded, so it runs to the end."
+        }
+        return nil
+    }
+
+    var canStopTransfer: Bool { stopUnavailableReason == nil }
+
+    /// Whether a stop control belongs on screen at all. Derived from the same
+    /// published state the reference captures pose, rather than from the task
+    /// handle, so a captured screen shows the control the user actually gets.
+    /// A scan in progress is excluded: it has nothing durable to stop.
+    var showsStopControl: Bool { isWorking && scanResult != nil && outcome == nil }
+
     /// Unfinished transfers found at launch. Presented before anything else,
     /// because starting a new transfer over an interrupted one is the mistake
     /// this screen exists to prevent.
@@ -71,6 +96,8 @@ final class AppModel {
     /// Destination roots the app can currently reach, from the same bookmarks
     /// recovery resolves. History reconciliation reads manifests under these.
     private var knownDestinationRoots: [URL] = []
+    /// The running transfer, held for one reason: so the user can stop it.
+    private var transferTask: Task<Void, Never>?
 
     init() {
         let supportBase = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -136,14 +163,15 @@ final class AppModel {
     }
 
     func beginTransfer() {
-        guard let plan = makePlan(), preflight?.canProceed == true else { return }
+        guard let plan = makePlan(), preflight?.canProceed == true, transferTask == nil else { return }
         isWorking = true
+        isCancelling = false
         outcome = nil
         copyProgress = nil
         verificationProgress = nil
         isFinalizing = false
         setStatus(.copying)
-        Task {
+        transferTask = Task {
             // Recorded before the first byte moves: if this run is interrupted,
             // relaunch recovery can only find these roots through these keys.
             let unrecorded = await rememberRoots(for: plan)
@@ -167,10 +195,30 @@ final class AppModel {
                     await recordHistory(from: outcome)
                 }
             } catch is CancellationError {
-                setStatus(.interrupted)
+                setStatus(isCancelling ? .cancelled : .interrupted)
+                // Stopping leaves a resumable transfer on the drives, and the
+                // recovery sheet is already the app's answer to one. The
+                // decision is due now rather than at the next launch.
+                await discoverUnfinishedTransfers()
             } catch { present(error, operation: "Transfer") }
+            isCancelling = false
+            transferTask = nil
             isWorking = false
         }
+    }
+
+    /// Stops the running transfer. Everything already written stays written and
+    /// stays recorded in the manifest; the file being copied when the stop lands
+    /// is discarded rather than left half-written; the source is not touched at
+    /// all. What is left is a transfer that can be resumed, not one that has to
+    /// be started over.
+    func cancelTransfer() {
+        guard canStopTransfer, let transferTask else { return }
+        isCancelling = true
+        // The card is still being read while the coordinator unwinds, so the
+        // warning that matters most has to survive the stop.
+        setStatus(.copying, message: "Stopping — do not remove card yet")
+        transferTask.cancel()
     }
 
     func refresh() async {
@@ -232,8 +280,15 @@ final class AppModel {
         reveal(URL(filePath: path))
     }
 
+    /// A stopped transfer has no outcome to report, but the card is in exactly
+    /// the state it arrived in — CardVault never writes to a source — so there
+    /// is no reason to make the user pull it from the Finder instead.
+    var canEjectSource: Bool {
+        sourceURL != nil && (outcome?.safeToEject == true || status == .cancelled)
+    }
+
     func ejectSource() {
-        guard outcome?.safeToEject == true, let sourceURL else { return }
+        guard canEjectSource, let sourceURL else { return }
         let name = sourceVolume?.displayName ?? sourceURL.lastPathComponent
         isWorking = true
         Task {
@@ -392,9 +447,10 @@ final class AppModel {
         verificationProgress = nil
         isFinalizing = false
         isPresentingRecovery = false
+        isCancelling = false
         section = .transfer
         setStatus(.copying, message: "Resuming \(transfer.name) — do not remove card yet")
-        Task {
+        transferTask = Task {
             do {
                 let plan = try await recoveryCoordinator.resumePlan(for: transfer)
                 let manifestURL = try await recoveryCoordinator.resumeManifestURL(for: transfer)
@@ -412,9 +468,12 @@ final class AppModel {
                     await forgetRoots(transferID: transfer.id)
                 }
             } catch is CancellationError {
-                setStatus(.interrupted, message: "Resume interrupted — Safe to eject")
+                setStatus(isCancelling ? .cancelled : .interrupted,
+                          message: isCancelling ? "Resume stopped — Safe to eject" : "Resume interrupted — Safe to eject")
             } catch { present(error, operation: "Resuming \(transfer.name)") }
             await discoverUnfinishedTransfers()
+            isCancelling = false
+            transferTask = nil
             isWorking = false
         }
     }
@@ -503,16 +562,19 @@ final class AppModel {
 
     private func receive(_ update: TransferProgress) {
         switch update.phase {
+        case .copying: copyProgress = update
+        case .verifying: verificationProgress = update
+        case .finalizing: isFinalizing = true
+        }
+        // A stop has already said so in the header. A snapshot still in flight
+        // behind it must not put the transfer back to "copying".
+        guard !isCancelling else { return }
+        switch update.phase {
         case .copying:
-            copyProgress = update
             // A copy at 100 percent is still not a success; verification decides.
             setStatus(update.isPhaseComplete ? .copyCompleteVerificationPending : .copying)
-        case .verifying:
-            verificationProgress = update
-            setStatus(.verifying)
-        case .finalizing:
-            isFinalizing = true
-            setStatus(.finalizing)
+        case .verifying: setStatus(.verifying)
+        case .finalizing: setStatus(.finalizing)
         }
     }
 

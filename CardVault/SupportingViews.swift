@@ -37,9 +37,14 @@ struct CardVaultCommands: Commands {
             Button("Start Transfer") { model.beginTransfer() }
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(model.preflight?.canProceed != true || model.isWorking)
+            // The toolbar swaps Start for Stop; the menu keeps both, so the
+            // shortcut for getting out of a transfer is always discoverable.
+            Button(model.isCancelling ? "Stopping…" : "Stop Transfer") { model.cancelTransfer() }
+                .keyboardShortcut(".", modifiers: .command)
+                .disabled(!model.canStopTransfer)
             Button("Eject Card") { model.ejectSource() }
                 .keyboardShortcut("e", modifiers: .command)
-                .disabled(model.outcome?.safeToEject != true)
+                .disabled(!model.canEjectSource)
         }
     }
 

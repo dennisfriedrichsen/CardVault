@@ -78,6 +78,11 @@ extension UIStateFixture {
             return base(state, copyProgress: pausedCopyProgress, outcome: conflictOutcome)
         case .interrupted:
             return base(state, copyProgress: pausedCopyProgress, recovery: interruptedScan)
+        // What is left on screen once the recovery sheet the stop raised has
+        // been dismissed: the partial copy, and no outcome, because the
+        // transfer produced no result to report.
+        case .cancelled:
+            return base(state, copyProgress: pausedCopyProgress)
         case .needsAttention:
             return base(state, copyProgress: pausedCopyProgress, outcome: needsAttentionOutcome)
         case .failed:

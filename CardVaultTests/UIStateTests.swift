@@ -94,6 +94,33 @@ struct UIStatePresentationTests {
         #expect(StatusPresentation.for(.conflictPaused, conflictCount: 4).announcement.contains("4 files"))
     }
 
+    /// Stopping is a choice the user made, and interruption is something that
+    /// happened to them. Collapsing the two sends someone hunting for a fault
+    /// that does not exist.
+    @Test("A stopped transfer is not presented as an interrupted one")
+    func stoppedIsNotInterrupted() {
+        let stopped = StatusPresentation.for(.cancelled)
+        let interrupted = StatusPresentation.for(.interrupted)
+        #expect(stopped.title != interrupted.title)
+        #expect(stopped.symbolName != interrupted.symbolName)
+        #expect(stopped.detail != interrupted.detail)
+        // Stopping destroys nothing, so it never reads as a failure.
+        #expect(stopped.tone != .blocked)
+        for text in [stopped.title, stopped.detail, stopped.announcement] {
+            #expect(!text.localizedCaseInsensitiveContains("failed"))
+        }
+    }
+
+    /// The two promises that decide whether stopping is safe to do: nothing
+    /// verified is thrown away, and the card was never written to.
+    @Test("The stopped status keeps both promises the user is stopping on")
+    func stoppedStatusKeepsItsPromises() {
+        let stopped = StatusPresentation.for(.cancelled)
+        #expect(stopped.detail.localizedCaseInsensitiveContains("verified stays verified"))
+        #expect(stopped.detail.localizedCaseInsensitiveContains("source was not changed"))
+        #expect(stopped.announcement.localizedCaseInsensitiveContains("safe to eject"))
+    }
+
     @Test("The combined accessibility label reads as one sentence")
     func accessibilityLabelCombinesTitleAndDetail() {
         let presentation = StatusPresentation.for(.verified)
@@ -191,6 +218,19 @@ struct UIStateFixtureTests {
         #expect(transfer.remainingFiles > 0)
         // One drive is away: the state has to be able to show that too.
         #expect(transfer.destinations.contains { !$0.isAvailable })
+    }
+
+    /// A stop produces no result to report: the transfer did not finish, so
+    /// there is no outcome, and nothing on screen may read as one.
+    @Test("The stopped fixture reports a partial copy and no outcome")
+    func stoppedFixtureHasNoOutcome() throws {
+        let stopped = UIStateFixture.fixture(for: .cancelled)
+        #expect(stopped.outcome == nil)
+        #expect(!stopped.isWorking)
+        let progress = try #require(stopped.copyProgress)
+        #expect(!progress.isPhaseComplete)
+        // The card is still selected: stopping does not put it away.
+        #expect(stopped.sourceVolume != nil)
     }
 
     @Test("The no-source fixture really has no source, and the empty one really scanned")

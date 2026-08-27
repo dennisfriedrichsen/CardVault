@@ -10,6 +10,7 @@ public enum InterruptedOperation: String, Sendable {
     case verifyingFiles
     case awaitingConflictResolution
     case finalizing
+    case stoppedByUser
     case unknown
 
     public var title: String {
@@ -20,6 +21,7 @@ public enum InterruptedOperation: String, Sendable {
         case .verifyingFiles: "Verifying copied files"
         case .awaitingConflictResolution: "Waiting on a destination conflict"
         case .finalizing: "Finalizing the transfer"
+        case .stoppedByUser: "Stopped by you"
         case .unknown: "Unknown"
         }
     }
@@ -32,6 +34,9 @@ public enum InterruptedOperation: String, Sendable {
         case .verifying: self = .verifyingFiles
         case .needsAttention: self = .awaitingConflictResolution
         case .verified, .partiallySuccessful, .failed: self = .finalizing
+        // Nothing went wrong here, and recovery saying "Unknown" about a
+        // transfer the user deliberately stopped reads as a fault report.
+        case .cancelled: self = .stoppedByUser
         default: self = .unknown
         }
     }
