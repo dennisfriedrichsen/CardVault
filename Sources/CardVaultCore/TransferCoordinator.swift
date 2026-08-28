@@ -6,6 +6,11 @@ public struct DestinationOutcome: Sendable, Identifiable {
     public let verifiedFiles: Int
     public let failedFiles: Int
     public let finalURL: URL?
+    /// Where this destination's manifest is now: inside the finalised folder
+    /// when the destination finished, and still in staging when it did not. A
+    /// destination without a `finalURL` has a durable record all the same, and
+    /// history that cannot name it reports a connected drive as missing.
+    public let manifestURL: URL?
     public var isVerified: Bool { failedFiles == 0 }
 }
 
@@ -38,6 +43,12 @@ public actor TransferCoordinator {
     private let classifier: ConflictClassifier
     private let now: @Sendable () -> Date
 
+    /// Destination copies this run itself read back and matched to the source,
+    /// as the classifier does when it satisfies a file instead of copying it.
+    /// A claim made by an earlier run is not in here, which is what makes it
+    /// possible to reread exactly those.
+    private var readBackThisRun: Set<ReadBack> = []
+
     /// Precise counters live here, on the coordinator. Only throttled snapshots
     /// ever reach the progress handler, so a fast drive cannot flood the caller.
     private var aggregator: ProgressAggregator?
@@ -56,8 +67,7 @@ public actor TransferCoordinator {
 
     public func execute(plan: TransferPlan, progress: ProgressHandler? = nil) async throws -> TransferOutcome {
         var manifest = TransferManifest(plan: plan, now: now())
-        let locations = destinationLocations(plan)
-        try await prepare(locations: locations)
+        let locations = try await prepare(locations: destinationLocations(plan))
         manifest.startedAt = now()
         return try await run(plan: plan, manifest: &manifest, locations: locations, progress: progress)
     }
@@ -66,15 +76,15 @@ public actor TransferCoordinator {
                        progress: ProgressHandler? = nil) async throws -> TransferOutcome {
         var manifest = try await manifestStore.load(from: manifestURL)
         guard manifest.transferID == plan.id else { throw ManifestError.noValidManifest }
-        let locations = destinationLocations(plan)
-        try await prepare(locations: locations)
+        let locations = try await prepare(locations: destinationLocations(plan))
         return try await run(plan: plan, manifest: &manifest, locations: locations, progress: progress)
     }
 
     private func run(plan: TransferPlan, manifest: inout TransferManifest, locations: [Location],
                      progress: ProgressHandler?) async throws -> TransferOutcome {
         progressHandler = progress
-        defer { progressHandler = nil; aggregator = nil }
+        readBackThisRun = []
+        defer { progressHandler = nil; aggregator = nil; readBackThisRun = [] }
         manifest.state = .copying
         try await persist(manifest, locations: locations)
 
@@ -104,12 +114,24 @@ public actor TransferCoordinator {
         }
     }
 
+    private struct ReadBack: Hashable, Sendable {
+        let fileIndex: Int
+        let destinationID: UUID
+    }
+
     private struct Location: Sendable {
         let destination: DestinationPlan
         let stagingRoot: URL
         let originalsRoot: URL
         let manifestURL: URL
         let finalRoot: URL
+        /// Measured once, in `prepare`, rather than inferred from the volume
+        /// kind: a mount that stores no birth time has to be recognised before
+        /// the first file, or every file reports the same shortfall.
+        var creationDatesSupported: Bool = false
+        /// Slack allowed when a written date is read back, from the destination
+        /// file system's own granularity.
+        var timestampTolerance: TimeInterval = TimestampTolerance.exact
     }
 
     private func destinationLocations(_ plan: TransferPlan) -> [Location] {
@@ -120,15 +142,20 @@ public actor TransferCoordinator {
             return Location(destination: destination, stagingRoot: staging,
                             originalsRoot: TransferLayout.originalsRoot(inStaging: staging),
                             manifestURL: TransferLayout.manifestURL(inStaging: staging),
-                            finalRoot: layout.finalRoot(in: parent))
+                            finalRoot: layout.finalRoot(in: parent),
+                            timestampTolerance: TimestampTolerance.forFileSystem(destination.volume.fileSystem))
         }
     }
 
-    private func prepare(locations: [Location]) async throws {
-        for location in locations {
+    private func prepare(locations: [Location]) async throws -> [Location] {
+        var prepared: [Location] = []
+        for var location in locations {
             if await fileSystem.exists(location.finalRoot) { throw FileSystemError.existingConflict(location.finalRoot.path) }
             try await fileSystem.createDirectory(location.originalsRoot)
+            location.creationDatesSupported = await fileSystem.supportsCreationDates(in: location.originalsRoot)
+            prepared.append(location)
         }
+        return prepared
     }
 
     private func persist(_ manifest: TransferManifest, locations: [Location]) async throws {
@@ -194,6 +221,13 @@ public actor TransferCoordinator {
         { [weak self] delta in await self?.recordBytes(delta) }
     }
 
+    /// One wording for every site that refuses a path, so the record reads the
+    /// same whether the copy, the dates, or the verification stopped on it.
+    private static func escapingPathError(_ relativePath: String) -> String {
+        "The transfer record names \(relativePath) as a destination path outside this transfer's folder. "
+            + "Nothing was read, written, or removed for it."
+    }
+
     // MARK: - Copy
 
     private func copy(plan: TransferPlan, manifest: inout TransferManifest,
@@ -224,11 +258,29 @@ public actor TransferCoordinator {
             for location in locations {
                 let result = manifest.files[index].destinations[location.destination.id]
                 guard result?.copyState != .copied && result?.verification != .verified else {
+                    // A file an earlier run copied still needs its dates, or the
+                    // archive ends up recording which run copied each file.
+                    if result?.timestamps?.needsApplication ?? true {
+                        await applyTimestamps(&manifest, fileIndex: index, location: location)
+                        try await persist(manifest, locations: locations)
+                    }
                     // Resumed work still counts toward the phase so the bar stays honest.
                     await recordBytes(file.byteCount)
                     continue
                 }
-                let destination = location.originalsRoot.appending(path: file.relativeDestinationPath)
+                guard let destination = TransferLayout.containedURL(
+                    relativePath: file.relativeDestinationPath, under: location.originalsRoot) else {
+                    // Nothing outside this transfer's own tree is ever removed or
+                    // written, whatever the record says. Recorded as a failure so
+                    // the destination cannot be reported verified.
+                    manifest.files[index].destinations[location.destination.id]?.copyState = .failed
+                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                    manifest.files[index].destinations[location.destination.id]?.error =
+                        Self.escapingPathError(file.relativeDestinationPath)
+                    try await persist(manifest, locations: locations)
+                    await recordBytes(file.byteCount)
+                    continue
+                }
                 if await fileSystem.exists(destination) {
                     let evidence = ConflictEvidence(
                         relativePath: file.relativeDestinationPath,
@@ -248,6 +300,12 @@ public actor TransferCoordinator {
                             assessment.existingChecksum
                         manifest.files[index].destinations[location.destination.id]?.verification = .verified
                         manifest.files[index].destinations[location.destination.id]?.error = nil
+                        // The digest came from this run's own read of the bytes
+                        // on disk, so verification has nothing left to confirm.
+                        readBackThisRun.insert(ReadBack(fileIndex: index, destinationID: location.destination.id))
+                        // A satisfied file is part of this archive, so it carries
+                        // the same dates as everything copied beside it.
+                        await applyTimestamps(&manifest, fileIndex: index, location: location)
                         try await persist(manifest, locations: locations)
                         await recordBytes(file.byteCount)
                         continue
@@ -277,6 +335,7 @@ public actor TransferCoordinator {
                     try await fileSystem.copyExclusive(from: source, to: destination,
                                                        expectedSize: file.byteCount, onBytes: onBytes)
                     manifest.files[index].destinations[location.destination.id]?.copyState = .copied
+                    await applyTimestamps(&manifest, fileIndex: index, location: location)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -292,6 +351,50 @@ public actor TransferCoordinator {
         return conflicts
     }
 
+    // MARK: - Timestamps
+
+    /// Carries the source's dates onto a destination copy CardVault stands
+    /// behind. Deliberately non-throwing: the bytes are the product, and a date
+    /// that would not write is a metadata shortfall, never a reason to fail a
+    /// copy whose digest matched. Writing to the destination is not a breach of
+    /// the never-touch-the-source rule — the source is still never written to.
+    private func applyTimestamps(_ manifest: inout TransferManifest, fileIndex: Int, location: Location) async {
+        let file = manifest.files[fileIndex]
+        guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
+                                                    under: location.originalsRoot) else {
+            // `setAttributes` on a path out of the tree would write metadata to
+            // whatever it landed on — the mounted card included.
+            manifest.files[fileIndex].destinations[location.destination.id]?.timestamps = TimestampOutcome(
+                creationDate: .failed, modificationDate: .failed,
+                error: Self.escapingPathError(file.relativeDestinationPath))
+            return
+        }
+        let outcome: TimestampOutcome
+        do {
+            outcome = try await fileSystem.applyTimestamps(
+                to: url, creationDate: file.creationDate, modificationDate: file.modificationDate,
+                creationDatesSupported: location.creationDatesSupported,
+                tolerance: location.timestampTolerance)
+        } catch {
+            outcome = TimestampOutcome(creationDate: .failed, modificationDate: .failed,
+                                       error: String(describing: error))
+        }
+        manifest.files[fileIndex].destinations[location.destination.id]?.timestamps = outcome
+    }
+
+    /// One line per destination rather than one per file. A destination that
+    /// stores no creation dates at all is silent by design; only a date that was
+    /// expected to stick and did not is worth telling the user about.
+    private func noteTimestampShortfalls(_ manifest: inout TransferManifest, locations: [Location]) {
+        for location in locations {
+            let failed = manifest.files.count { $0.destinations[location.destination.id]?.timestamps?.hasFailure == true }
+            guard failed > 0 else { continue }
+            manifest.warnings.append(
+                "\(location.destination.label): \(failed) verified \(failed == 1 ? "file" : "files") kept the copy date "
+                + "instead of the original date. The copies themselves are complete and verified.")
+        }
+    }
+
     /// Stops before verification with everything already written left intact and
     /// durably recorded, so the user can resolve each conflict and resume.
     private func pause(manifest: inout TransferManifest, locations: [Location],
@@ -302,11 +405,11 @@ public actor TransferCoordinator {
         }
         try await persist(manifest, locations: locations)
         let outcomes = locations.map { location -> DestinationOutcome in
-            let values = manifest.files.compactMap { $0.destinations[location.destination.id] }
+            let values = manifest.files.map { $0.destinations[location.destination.id] }
             return DestinationOutcome(id: location.destination.id, label: location.destination.label,
-                                      verifiedFiles: values.count { $0.verification == .verified },
-                                      failedFiles: values.count { $0.verification != .verified },
-                                      finalURL: nil)
+                                      verifiedFiles: values.count { $0?.verification == .verified },
+                                      failedFiles: values.count { $0?.verification != .verified },
+                                      finalURL: nil, manifestURL: location.manifestURL)
         }
         // Resuming needs the card again, so this is not the moment to eject it.
         return TransferOutcome(transferID: manifest.transferID, state: .needsAttention,
@@ -336,12 +439,28 @@ public actor TransferCoordinator {
             await beginFile(file.relativeSourcePath)
             var jobs: [VerificationJob] = []
             for location in locations {
-                guard manifest.files[index].destinations[location.destination.id]?.copyState == .copied else {
+                // `.copied` and `.skipped` both mean bytes CardVault stands
+                // behind are supposed to be at this path, and both are read
+                // back here. A `.skipped` file recorded by an earlier run is
+                // the one case where a verified claim would otherwise rest on
+                // a read this process never performed — however long ago that
+                // run was, and whatever happened to the file since.
+                let copyState = manifest.files[index].destinations[location.destination.id]?.copyState
+                let alreadyReadBack = readBackThisRun.contains(
+                    ReadBack(fileIndex: index, destinationID: location.destination.id))
+                guard copyState == .copied || (copyState == .skipped && !alreadyReadBack) else {
                     await recordBytes(file.byteCount)
                     continue
                 }
-                jobs.append(.init(destinationID: location.destination.id,
-                                  url: location.originalsRoot.appending(path: file.relativeDestinationPath)))
+                guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
+                                                            under: location.originalsRoot) else {
+                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                    manifest.files[index].destinations[location.destination.id]?.error =
+                        Self.escapingPathError(file.relativeDestinationPath)
+                    await recordBytes(file.byteCount)
+                    continue
+                }
+                jobs.append(.init(destinationID: location.destination.id, url: url))
             }
             let records = try await checksums(for: jobs, expectedSize: file.byteCount, readers: readers)
             for record in records {
@@ -425,46 +544,59 @@ public actor TransferCoordinator {
 
     private func finish(plan: TransferPlan, manifest: inout TransferManifest,
                         locations: [Location]) async throws -> TransferOutcome {
+        // Every file is counted, present in the destination's record or not: a
+        // file with no entry has not been verified, and dropping it from both
+        // counts would finalise a destination on a record that never mentions it.
         let destinationResults = locations.map { location -> (Location, Int, Int) in
-            let values = manifest.files.compactMap { $0.destinations[location.destination.id] }
-            return (location, values.count { $0.verification == .verified }, values.count { $0.verification != .verified })
+            let values = manifest.files.map { $0.destinations[location.destination.id] }
+            return (location, values.count { $0?.verification == .verified },
+                    values.count { $0?.verification != .verified })
         }
         let successes = destinationResults.count { $0.2 == 0 }
+        noteTimestampShortfalls(&manifest, locations: locations)
         manifest.completedAt = now()
-        if successes == locations.count {
-            manifest.state = .verified
-            manifest.verifiedAt = now()
-        } else if successes > 0 {
-            manifest.state = .partiallySuccessful
-        } else {
-            manifest.state = .failed
-        }
+        let outcomeState: TransferState =
+            successes == locations.count ? .verified : (successes > 0 ? .partiallySuccessful : .failed)
+        manifest.state = outcomeState
+        if outcomeState == .verified { manifest.verifiedAt = now() }
         try await persist(manifest, locations: locations)
         beginPhase(.finalizing, totalFiles: manifest.files.count, totalBytes: workBytes(plan, passes: 1))
         await recordBytes(plan.totalBytes)
         await flushPhase(currentRelativePath: .some(nil))
         var outcomes: [DestinationOutcome] = []
+        var finalized: [Location] = []
         for (location, verified, failed) in destinationResults {
-            var finalURL: URL?
-            if failed == 0 {
-                try await fileSystem.move(location.stagingRoot, to: location.finalRoot)
-                finalURL = location.finalRoot
+            guard failed == 0 else {
+                // Nothing is moved, so this destination's record stays in
+                // staging — where it keeps `outcomeState`, and where recovery
+                // finds it at the next launch.
+                outcomes.append(.init(id: location.destination.id, label: location.destination.label,
+                                      verifiedFiles: verified, failedFiles: failed, finalURL: nil,
+                                      manifestURL: location.manifestURL))
+                continue
             }
+            try await fileSystem.move(location.stagingRoot, to: location.finalRoot)
+            let finalLocation = Location(
+                destination: location.destination, stagingRoot: location.finalRoot,
+                originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
+                manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
+                finalRoot: location.finalRoot,
+                creationDatesSupported: location.creationDatesSupported,
+                timestampTolerance: location.timestampTolerance)
+            finalized.append(finalLocation)
             outcomes.append(.init(id: location.destination.id, label: location.destination.label,
-                                  verifiedFiles: verified, failedFiles: failed, finalURL: finalURL))
+                                  verifiedFiles: verified, failedFiles: failed, finalURL: location.finalRoot,
+                                  manifestURL: finalLocation.manifestURL))
         }
-        // All source FileHandles are scoped and closed before this durable transition.
-        manifest.state = .safeToEject
-        let finalLocations = locations.map { location in
-            guard outcomes.first(where: { $0.id == location.destination.id })?.finalURL != nil else { return location }
-            return Location(destination: location.destination, stagingRoot: location.finalRoot,
-                            originalsRoot: TransferLayout.originalsRoot(inStaging: location.finalRoot),
-                            manifestURL: TransferLayout.manifestURL(inStaging: location.finalRoot),
-                            finalRoot: location.finalRoot)
-        }
-        try await persist(manifest, locations: finalLocations)
-        return TransferOutcome(transferID: plan.id,
-                               state: successes == locations.count ? .verified : (successes > 0 ? .partiallySuccessful : .failed),
+        // All source FileHandles are scoped and closed before this durable
+        // transition. `.safeToEject` describes the card and is recorded only
+        // where the transfer actually finished: writing it over a destination
+        // that still holds a staging tree would erase the one record saying
+        // that tree is unfinished, and recovery would never offer it again.
+        var ejectable = manifest
+        ejectable.state = .safeToEject
+        try await persist(ejectable, locations: finalized)
+        return TransferOutcome(transferID: plan.id, state: outcomeState,
                                destinations: outcomes, safeToEject: true)
     }
 }

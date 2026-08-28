@@ -25,22 +25,44 @@ public struct PreflightResult: Sendable {
 public struct TransferPreflightService: Sendable {
     public var safetyMarginBytes: Int64
     private let capacityProvider: @Sendable (URL) -> Int64?
+    private let readabilityProvider: @Sendable (URL) -> Bool
+    /// Whether a destination keeps two names that differ only in case as two
+    /// files. Nil when the mount will not say.
+    private let caseSensitivityProvider: @Sendable (URL) -> Bool?
 
     public init(safetyMarginBytes: Int64 = 1_073_741_824) {
         self.safetyMarginBytes = safetyMarginBytes
         capacityProvider = Self.availableCapacity
+        readabilityProvider = Self.isReadable
+        caseSensitivityProvider = Self.supportsCaseSensitiveNames
+    }
+
+    /// Every probe is injectable so that `validate` can be run as a pure
+    /// function of a plan. That is what lets the UI fixtures derive their
+    /// preflight results from the real check rather than hand-writing issues
+    /// that no code path produces.
+    init(safetyMarginBytes: Int64 = 1_073_741_824,
+         capacityProvider: @escaping @Sendable (URL) -> Int64?,
+         readabilityProvider: @escaping @Sendable (URL) -> Bool = Self.isReadable,
+         caseSensitivityProvider: @escaping @Sendable (URL) -> Bool? = Self.supportsCaseSensitiveNames) {
+        self.safetyMarginBytes = safetyMarginBytes
+        self.capacityProvider = capacityProvider
+        self.readabilityProvider = readabilityProvider
+        self.caseSensitivityProvider = caseSensitivityProvider
     }
 
     init(safetyMarginBytes: Int64 = 1_073_741_824,
-         capacityProvider: @escaping @Sendable (URL) -> Int64?) {
+         caseSensitivityProvider: @escaping @Sendable (URL) -> Bool?) {
         self.safetyMarginBytes = safetyMarginBytes
-        self.capacityProvider = capacityProvider
+        capacityProvider = Self.availableCapacity
+        readabilityProvider = Self.isReadable
+        self.caseSensitivityProvider = caseSensitivityProvider
     }
 
     public func validate(_ plan: TransferPlan) -> PreflightResult {
         var issues: [PreflightIssue] = []
         let source = URL(filePath: plan.sourceRootPath).standardizedFileURL
-        if !FileManager.default.isReadableFile(atPath: source.path) {
+        if !readabilityProvider(source) {
             issues.append(.init(code: "source-unreadable", severity: .blocking, message: "The source is unavailable or unreadable."))
         }
         if plan.destinations.isEmpty {
@@ -71,16 +93,15 @@ public struct TransferPreflightService: Sendable {
                 issues.append(.init(code: "network-backup", severity: .warning,
                                     message: "Backup is on network storage. Keep it mounted until copying and verification finish."))
             }
-            if destination.volume.fileSystem.localizedCaseInsensitiveContains("exFAT") {
-                let forbidden = CharacterSet(charactersIn: "<>:\"\\|?*")
-                if plan.files.contains(where: { file in
-                    file.relativePath.split(separator: "/").contains { component in
-                        component.rangeOfCharacter(from: forbidden) != nil || component.hasSuffix(".") || component.hasSuffix(" ")
-                    }
-                }) {
-                    issues.append(.init(code: "exfat-name", severity: .blocking,
-                                        message: "A source filename is incompatible with exFAT/Windows naming rules."))
-                }
+            if destination.volume.format.isWindowsNative,
+               let awkward = plan.files.first(where: { Self.isAwkwardOnWindows($0.relativePath) }) {
+                issues.append(.init(code: "windows-name", severity: .warning,
+                                    message: "\(awkward.relativePath) uses characters Windows will not open. It copies and verifies correctly onto \(destination.label); only opening it later on a Windows PC is affected."))
+            }
+            if let maximum = destination.volume.format.maximumFileSize,
+               let oversized = plan.files.first(where: { $0.byteCount > maximum }) {
+                issues.append(.init(code: "file-too-large", severity: .blocking,
+                                    message: "\(oversized.relativePath) is \(oversized.byteCount.formatted(.byteCount(style: .file))), and \(destination.label) is FAT-formatted, which cannot store a file of 4 GB or more however much space is free. Reformat \(destination.label) as exFAT or APFS, or choose another destination."))
             }
             if plan.files.contains(where: { $0.relativePath.utf8.count > 1_024 }) {
                 issues.append(.init(code: "path-too-long", severity: .blocking,
@@ -92,6 +113,24 @@ public struct TransferPreflightService: Sendable {
         }
         issues += collisionIssues(files: plan.files, destinations: plan.destinations)
         return PreflightResult(destinations: destinationChecks, issues: issues)
+    }
+
+    /// exFAT and FAT store these names byte-identical, and macOS writes them to
+    /// both formats without complaint — measured on freshly created images of
+    /// each. What refuses them is Windows, later, on another machine. That is a
+    /// portability caveat about a different operating system, not a fact about
+    /// whether this copy can be written and verified here, so it warns instead of
+    /// blocking: only the user knows whether the drive is bound for a PC.
+    private static func isAwkwardOnWindows(_ relativePath: String) -> Bool {
+        let forbidden = CharacterSet(charactersIn: "<>:\"\\|?*")
+        return relativePath.split(separator: "/").contains { component in
+            component.rangeOfCharacter(from: forbidden) != nil
+                || component.hasSuffix(".") || component.hasSuffix(" ")
+        }
+    }
+
+    static func isReadable(_ url: URL) -> Bool {
+        FileManager.default.isReadableFile(atPath: url.path)
     }
 
     private static func availableCapacity(at url: URL) -> Int64? {
@@ -118,6 +157,15 @@ public struct TransferPreflightService: Sendable {
             for second in destinations.indices where second > first {
                 let one = destinations[first]
                 let other = destinations[second]
+                // Overlapping roots are checked before volume identity because
+                // they are the stronger fact: two destinations under one path
+                // are one copy, so saying only that they share a volume would
+                // understate it. Both directions of nesting are checked, so the
+                // order the user picked the folders in does not change the verdict.
+                if let overlap = overlapIssue(one, other) ?? overlapIssue(other, one) {
+                    issues.append(overlap)
+                    continue
+                }
                 switch one.volume.relation(to: other.volume) {
                 case .sameVolume:
                     issues.append(.init(code: "same-volume", severity: .warning,
@@ -133,13 +181,46 @@ public struct TransferPreflightService: Sendable {
         return issues
     }
 
+    /// A second destination that resolves to the first, or sits inside it, is not
+    /// a second copy: both write the same tree, so one deletion loses both and
+    /// the transfer cannot finalise two identical folders into one name. This
+    /// blocks rather than warns because the run would otherwise report a backup
+    /// the user does not have.
+    private func overlapIssue(_ one: DestinationPlan, _ other: DestinationPlan) -> PreflightIssue? {
+        let onePath = URL(filePath: one.rootPath, directoryHint: .isDirectory).standardizedFileURL.path
+        let otherPath = URL(filePath: other.rootPath, directoryHint: .isDirectory).standardizedFileURL.path
+        if onePath == otherPath {
+            return .init(code: "destination-overlap", severity: .blocking,
+                         message: "\(one.label) and \(other.label) are the same folder, so only one copy would be made. Choose a different folder for \(other.label).")
+        }
+        if otherPath.hasPrefix(onePath + "/") {
+            return .init(code: "destination-overlap", severity: .blocking,
+                         message: "\(other.label) is inside \(one.label), so the two copies would not be independent. Choose a folder outside \(one.label) for \(other.label).")
+        }
+        return nil
+    }
+
+    /// Two source names that differ only in case become one file on a
+    /// case-insensitive destination, so one photograph would silently stand in
+    /// for two. The question is asked of the mount itself: case sensitivity is
+    /// not something the volume kind reports — APFS and HFS+ each come in both
+    /// variants — and a mount that will not answer is treated as insensitive,
+    /// because refusing a transfer that would have worked costs less than
+    /// finalising one file where the card held two.
     private func collisionIssues(files: [SourceFile], destinations: [DestinationPlan]) -> [PreflightIssue] {
         let folded = Dictionary(grouping: files, by: { $0.relativePath.folding(options: [.caseInsensitive], locale: nil) })
-        guard folded.values.contains(where: { Set($0.map(\.relativePath)).count > 1 }) else { return [] }
-        if destinations.contains(where: { !$0.volume.fileSystem.lowercased().contains("case-sensitive") }) {
-            return [.init(code: "case-collision", severity: .blocking,
-                          message: "Source paths collide on a case-insensitive destination filesystem.")]
+        guard let colliding = folded.values.first(where: { Set($0.map(\.relativePath)).count > 1 }) else { return [] }
+        let insensitive = destinations.filter {
+            caseSensitivityProvider(URL(filePath: $0.rootPath, directoryHint: .isDirectory)) != true
         }
-        return []
+        guard !insensitive.isEmpty else { return [] }
+        let names = Set(colliding.map(\.relativePath)).sorted()
+        return [.init(code: "case-collision", severity: .blocking,
+                      message: "\(names[0]) and \(names[1]) differ only in case, and \(insensitive.map(\.label).joined(separator: " and ")) would store them as one file. Copy them separately, or choose a destination that keeps names differing only in case apart.")]
+    }
+
+    /// Measured at the destination root rather than inferred from its label.
+    private static func supportsCaseSensitiveNames(at url: URL) -> Bool? {
+        (try? url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames
     }
 }

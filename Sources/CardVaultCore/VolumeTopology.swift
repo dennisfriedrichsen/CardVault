@@ -158,3 +158,67 @@ extension VolumeIdentity {
         return mine == theirs
     }
 }
+
+/// The storage format families CardVault has to reason about.
+///
+/// `VolumeIdentity.fileSystem` arrives in one of two vocabularies and neither can
+/// be assumed: Disk Arbitration supplies the stable `kDADiskDescriptionVolumeKindKey`
+/// tokens (`apfs`, `hfs`, `exfat`, `msdos`), while the documented fallback supplies
+/// `volumeLocalizedFormatDescription` — user-locale text such as `ExFAT` or
+/// `MS-DOS (FAT32)`. Testing that localized text directly is why checks written for
+/// `"exFAT"` never fired on a FAT volume, whose description is `MS-DOS (FAT32)`, so
+/// both vocabularies are recognised here and callers compare against a format instead
+/// of a string.
+///
+/// `msdos` covers FAT16 and FAT32 alike: Disk Arbitration reports one kind for both
+/// and only the localized description separates them. Nothing CardVault checks needs
+/// them apart.
+public enum VolumeFormat: String, Sendable {
+    case apfs, hfs, exfat, fat, other
+}
+
+extension VolumeFormat {
+    public init(fileSystemDescription description: String) {
+        let text = description.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Disk Arbitration's volume kinds are exact tokens and are matched as
+        // such. Everything below is localized prose, whose wording varies, so it
+        // is matched loosely.
+        switch text {
+        case "apfs": self = .apfs; return
+        case "hfs", "hfs+", "hfsplus": self = .hfs; return
+        case "exfat": self = .exfat; return
+        case "msdos": self = .fat; return
+        default: break
+        }
+        if text.contains("exfat") { self = .exfat; return }
+        // Probed after exFAT, whose name ends in the same three letters. A bare
+        // "fat" counts only as its own word, so it cannot match inside an
+        // unrelated volume name.
+        let words = text.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        if ["fat32", "fat16", "ms-dos"].contains(where: text.contains) || words.contains("fat") {
+            self = .fat
+            return
+        }
+        if text.contains("apfs") { self = .apfs; return }
+        if text.contains("mac os extended") || text.contains("hfs") { self = .hfs; return }
+        self = .other
+    }
+
+    /// True for the formats Windows reads natively, and therefore the ones whose
+    /// contents are likely to be carried to a Windows machine later.
+    public var isWindowsNative: Bool { self == .exfat || self == .fat }
+
+    /// The largest file the format can store, for the formats that cap it.
+    ///
+    /// FAT refuses a file of 4 GiB or more outright, whatever the free space:
+    /// measured on a FAT32 image with 6 GB available, where 4294967295 bytes
+    /// wrote and 4294967296 failed with `EFBIG`. exFAT has no such limit, which
+    /// is exactly why cameras moved to it for 4K video, so this must stay
+    /// FAT-only. FAT16 shares the cap trivially — its whole volume tops out at
+    /// 4 GB — so the one value covers both members of the family.
+    public var maximumFileSize: Int64? { self == .fat ? 4_294_967_295 : nil }
+}
+
+extension VolumeIdentity {
+    public var format: VolumeFormat { VolumeFormat(fileSystemDescription: fileSystem) }
+}

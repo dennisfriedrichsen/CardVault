@@ -88,6 +88,47 @@ struct CoreTests {
             #expect(result.excludedFiles.count == 1)
             #expect(result.rawJPEGPairCount == 1)
             #expect(result.files.contains { $0.relativePath == "DCIM/100CANON/日本.mov" })
+            #expect(result.composition.fileCount(of: .photo) == 2)
+            #expect(result.composition.fileCount(of: .video) == 1)
+        }
+    }
+
+    @Test("A video card describes itself without borrowing stills vocabulary")
+    func scanVideoCard() throws {
+        try withTemporaryDirectorySync { root in
+            let dcim = root.appending(path: "DCIM/100GOPRO")
+            try FileManager.default.createDirectory(at: dcim, withIntermediateDirectories: true)
+            try Data([1, 2, 3, 4]).write(to: dcim.appending(path: "GX010007.MP4"))
+            try Data([1, 2]).write(to: dcim.appending(path: "GL010007.LRV"))
+            try Data([1]).write(to: dcim.appending(path: "GX010007.THM"))
+            try Data([1]).write(to: dcim.appending(path: "GOPR0042.JPG"))
+            try Data([1]).write(to: dcim.appending(path: "GOPR0043.GPR"))
+            let result = try SourceScanner().scan(root: root, mode: .mediaOnly)
+
+            // The proxy and the thumbnail are written by the camera and cannot be
+            // regenerated from the clip, so media-only must not drop them.
+            #expect(result.files.count == 5)
+            #expect(result.excludedFiles.isEmpty)
+            #expect(result.rawJPEGPairCount == 0)
+            #expect(result.composition.fileCount(of: .video) == 1)
+            #expect(result.composition.fileCount(of: .photo) == 2)
+            #expect(result.composition.fileCount(of: .sidecar) == 2)
+            #expect(result.composition.groups.map(\.category) == [.photo, .video, .sidecar])
+        }
+    }
+
+    @Test("A JPEG-only card reports no pairs and only the categories it holds")
+    func scanJPEGOnlyCard() throws {
+        try withTemporaryDirectorySync { root in
+            let dcim = root.appending(path: "DCIM/101NIKON")
+            try FileManager.default.createDirectory(at: dcim, withIntermediateDirectories: true)
+            try Data([1]).write(to: dcim.appending(path: "DSC_0001.JPG"))
+            try Data([2, 3]).write(to: dcim.appending(path: "DSC_0002.JPG"))
+            let result = try SourceScanner().scan(root: root, mode: .mediaOnly)
+            #expect(result.rawJPEGPairCount == 0)
+            #expect(result.composition.groups.count == 1)
+            #expect(result.composition.groups.first?.category == .photo)
+            #expect(result.composition.groups.first?.byteCount == 3)
         }
     }
 
@@ -118,6 +159,43 @@ struct CoreTests {
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
             #expect(result.issues.contains { $0.code == "destination-in-source" && $0.severity == .blocking })
         }
+    }
+
+    @Test("Preflight blocks a backup that is the same folder as the primary")
+    func duplicateDestinationFolder() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.appending(path: "out")
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let plan = makePlan(source: root.appending(path: "card"), destinations: [destination, destination], files: [])
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(result.issues.contains { $0.code == "destination-overlap" && $0.severity == .blocking })
+            #expect(!result.canProceed)
+            // The stronger path fact replaces the volume warning rather than joining it.
+            #expect(!result.issues.contains { $0.code == "same-volume" || $0.code == "same-device" })
+        }
+    }
+
+    @Test("Preflight blocks a backup nested inside the primary, in either order")
+    func nestedDestinationFolder() throws {
+        try withTemporaryDirectorySync { root in
+            let outer = root.appending(path: "out")
+            let inner = outer.appending(path: "backup")
+            try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+            let source = root.appending(path: "card")
+            for pair in [[outer, inner], [inner, outer]] {
+                let result = TransferPreflightService(safetyMarginBytes: 0)
+                    .validate(makePlan(source: source, destinations: pair, files: []))
+                #expect(result.issues.contains { $0.code == "destination-overlap" && $0.severity == .blocking })
+            }
+        }
+    }
+
+    @Test("A file system failure describes itself instead of showing an error number")
+    func fileSystemErrorsAreReadable() {
+        let message = FileSystemError.existingConflict("/Volumes/Photos/2026-08-26").localizedDescription
+        #expect(message.contains("/Volumes/Photos/2026-08-26"))
+        #expect(!message.contains("error 7"))
+        #expect(FileSystemError.sourceChanged("IMG.CR3").localizedDescription.contains("IMG.CR3"))
     }
 
     @Test("Preflight warns when both copies share one physical device")
@@ -187,23 +265,165 @@ struct CoreTests {
             let files = [SourceFile(relativePath: "A.JPG", byteCount: 1, mediaKind: .jpeg),
                          SourceFile(relativePath: "a.jpg", byteCount: 1, mediaKind: .jpeg)]
             let plan = makePlan(source: root, destinations: [destination], files: files)
+            // The real mount is asked here: the temporary directory lives on a
+            // case-insensitive volume, so this exercises the measurement itself.
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
-            #expect(result.issues.contains { $0.code == "case-collision" })
+            let issue = try #require(result.issues.first { $0.code == "case-collision" })
+            #expect(issue.severity == .blocking)
+            // The message names the pair and the destination rather than asserting
+            // something the user cannot check.
+            #expect(issue.message.contains("A.JPG") && issue.message.contains("a.jpg"))
+            #expect(issue.message.contains("Primary"))
         }
     }
 
-    @Test("exFAT-incompatible filenames are blocked")
-    func exFATName() throws {
+    /// The volume kind never spells out case sensitivity — APFS and HFS+ each
+    /// come in both variants — so a destination that can hold both spellings
+    /// must not be refused on the strength of its label.
+    @Test("A case-sensitive destination is allowed to store both spellings")
+    func caseCollisionAllowedOnCaseSensitiveDestination() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "IMG_001.JPG", byteCount: 1, mediaKind: .jpeg),
+                         SourceFile(relativePath: "img_001.jpg", byteCount: 1, mediaKind: .jpeg)]
+            let plan = makePlan(source: root, destinations: [destination], files: files)
+            let result = TransferPreflightService(safetyMarginBytes: 0) { url in
+                #expect(url.standardizedFileURL.path == destination.standardizedFileURL.path)
+                return true
+            }.validate(plan)
+            #expect(!result.issues.contains { $0.code == "case-collision" })
+            #expect(result.canProceed)
+        }
+    }
+
+    /// A mount that will not answer is treated as case-insensitive: a wrong
+    /// refusal is recoverable, one file standing in for two is not.
+    @Test("A destination that cannot report case sensitivity still blocks a collision")
+    func caseCollisionBlocksWhenSensitivityUnknown() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "A.JPG", byteCount: 1, mediaKind: .jpeg),
+                         SourceFile(relativePath: "a.jpg", byteCount: 1, mediaKind: .jpeg)]
+            let plan = makePlan(source: root, destinations: [destination], files: files)
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in nil }.validate(plan)
+            #expect(result.issues.contains { $0.code == "case-collision" && $0.severity == .blocking })
+        }
+    }
+
+    /// The name is storable on exFAT and FAT alike, so the transfer must still be
+    /// allowed to start; only Windows would refuse to open it afterwards.
+    @Test("Windows-hostile filenames warn on FAT-family destinations without blocking",
+          arguments: ["exfat", "ExFAT", "msdos", "MS-DOS (FAT32)"])
+    func windowsNameWarning(fileSystem: String) throws {
         try withTemporaryDirectorySync { root in
             let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: destination) }
             let files = [SourceFile(relativePath: "DCIM/bad:name.jpg", byteCount: 1, mediaKind: .jpeg)]
             var plan = makePlan(source: root, destinations: [destination], files: files)
-            plan.destinations[0].volume.fileSystem = "exFAT"
+            plan.destinations[0].volume.fileSystem = fileSystem
             let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
-            #expect(result.issues.contains { $0.code == "exfat-name" })
+            #expect(result.issues.contains { $0.code == "windows-name" && $0.severity == .warning })
+            #expect(result.canProceed)
         }
+    }
+
+    @Test("Windows-hostile filenames are ignored on a destination Windows cannot read",
+          arguments: ["apfs", "APFS", "hfs", "Mac OS Extended"])
+    func windowsNameIgnoredOnMacFormats(fileSystem: String) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "DCIM/bad:name.jpg", byteCount: 1, mediaKind: .jpeg)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = fileSystem
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(!result.issues.contains { $0.code == "windows-name" })
+        }
+    }
+
+    /// Trailing dots and spaces are the half of the rule that is invisible in a
+    /// filename, so they are asserted separately from the punctuation set.
+    @Test("Trailing dots and spaces warn, ordinary camera names do not",
+          arguments: [("DCIM/clip.", true), ("DCIM/clip ", true),
+                      ("DCIM/100EOS_R/IMG_0433.CR3", false), ("PRIVATE/M4ROOT/CLIP/C0007.MP4", false)])
+    func windowsNameBoundaries(relativePath: String, warns: Bool) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: relativePath, byteCount: 1, mediaKind: .jpeg)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = "exfat"
+            let result = TransferPreflightService(safetyMarginBytes: 0).validate(plan)
+            #expect(result.issues.contains { $0.code == "windows-name" } == warns)
+        }
+    }
+
+    /// The limit is exact and hard: 4294967295 bytes is the largest file FAT can
+    /// hold, and free space does not enter into it — a 6 GB FAT32 image refuses a
+    /// 4 GiB file. Sizes are posed rather than written so the test needs no media.
+    @Test("A file at or over 4 GiB blocks a FAT destination",
+          arguments: [("msdos", Int64(4_294_967_296), true),
+                      ("MS-DOS (FAT32)", Int64(4_294_967_296), true),
+                      ("MS-DOS (FAT16)", Int64(5_368_709_120), true),
+                      ("msdos", Int64(4_294_967_295), false),
+                      ("exfat", Int64(8_589_934_592), false),
+                      ("APFS", Int64(8_589_934_592), false)])
+    func fatFileSizeLimit(fileSystem: String, byteCount: Int64, blocks: Bool) throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "PRIVATE/M4ROOT/CLIP/C0007.MP4",
+                                    byteCount: byteCount, mediaKind: .video)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = fileSystem
+            // Ample free space, so only the format's own cap can be the reason.
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 1_000_000_000_000 }.validate(plan)
+            let blocked = result.issues.contains { $0.code == "file-too-large" && $0.severity == .blocking }
+            #expect(blocked == blocks)
+            #expect(result.canProceed == !blocks)
+        }
+    }
+
+    @Test("The blocking message names the offending file")
+    func fatFileSizeLimitNamesFile() throws {
+        try withTemporaryDirectorySync { root in
+            let destination = root.deletingLastPathComponent().appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let files = [SourceFile(relativePath: "DCIM/small.JPG", byteCount: 1_000, mediaKind: .jpeg),
+                         SourceFile(relativePath: "CLIP/C0007.MP4", byteCount: 5_368_709_120, mediaKind: .video)]
+            var plan = makePlan(source: root, destinations: [destination], files: files)
+            plan.destinations[0].volume.fileSystem = "msdos"
+            let result = TransferPreflightService(safetyMarginBytes: 0) { _ in 1_000_000_000_000 }.validate(plan)
+            let issue = try #require(result.issues.first { $0.code == "file-too-large" })
+            #expect(issue.message.contains("CLIP/C0007.MP4"))
+        }
+    }
+
+    @Test("Only FAT caps a file's size")
+    func maximumFileSizeByFormat() {
+        #expect(VolumeFormat.fat.maximumFileSize == 4_294_967_295)
+        for format in [VolumeFormat.exfat, .apfs, .hfs, .other] {
+            #expect(format.maximumFileSize == nil)
+        }
+    }
+
+    @Test("Volume formats resolve from both Disk Arbitration kinds and localized descriptions",
+          arguments: [("exfat", VolumeFormat.exfat), ("ExFAT", .exfat),
+                      ("msdos", .fat), ("MS-DOS (FAT32)", .fat), ("MS-DOS (FAT16)", .fat),
+                      ("apfs", .apfs), ("APFS", .apfs),
+                      ("hfs", .hfs), ("Mac OS Extended", .hfs),
+                      ("Network File System (NFS)", .other), ("Unknown", .other)])
+    func volumeFormatClassification(fileSystem: String, expected: VolumeFormat) {
+        #expect(VolumeIdentity(displayName: "V", fileSystem: fileSystem).format == expected)
     }
 
     @Test("SHA-256 matches the standard digest")
@@ -270,6 +490,56 @@ struct CoreTests {
             let resumed = try await TransferCoordinator().resume(plan: plan, manifestURL: manifestURL)
             #expect(resumed.state == .verified)
             #expect(resumed.destinations[0].verifiedFiles == plan.files.count)
+        }
+    }
+
+    /// The manifest is the one document CardVault reads back that it did not
+    /// necessarily write: it sits on removable media, and every path in it is
+    /// joined onto a destination root before files are deleted and written.
+    @Test("A manifest whose paths could leave the transfer tree is rejected on decode")
+    func manifestPathsAreValidatedOnDecode() async throws {
+        try await withTemporaryDirectory { root in
+            let plan = makePlan(source: root, destinations: [root], files: [
+                SourceFile(relativePath: "DCIM/photo.CR3", byteCount: 1, mediaKind: .raw)
+            ])
+            let store = ManifestStore()
+            for path in ["../../../elsewhere.jpg", "DCIM/../../elsewhere.jpg", "/etc/hosts", "",
+                         "DCIM/pho\u{0}to.CR3"] {
+                var manifest = TransferManifest(plan: plan)
+                manifest.files[0].relativeDestinationPath = path
+                let url = root.appending(path: "\(UUID().uuidString).json")
+                try await store.save(manifest, to: url)
+                await #expect(throws: ManifestError.unsafePath(path), "\(path) was accepted") {
+                    try await store.load(from: url)
+                }
+            }
+            // The source path is checked on the same footing: it is the other
+            // half of the record and no more trustworthy.
+            var manifest = TransferManifest(plan: plan)
+            manifest.files[0].relativeSourcePath = "../../secrets.CR3"
+            let url = root.appending(path: "source.json")
+            try await store.save(manifest, to: url)
+            await #expect(throws: ManifestError.unsafePath("../../secrets.CR3")) {
+                try await store.load(from: url)
+            }
+        }
+    }
+
+    /// Bounded above only, a zero or negative version decoded as if it were v1.
+    @Test("A schema version this build never wrote is rejected")
+    func manifestSchemaVersionIsBoundedBelow() async throws {
+        try await withTemporaryDirectory { root in
+            let plan = makePlan(source: root, destinations: [root], files: [])
+            let store = ManifestStore()
+            for version in [0, -1] {
+                var manifest = TransferManifest(plan: plan)
+                manifest.schemaVersion = version
+                let url = root.appending(path: "v\(version).json")
+                try await store.save(manifest, to: url)
+                await #expect(throws: ManifestError.invalidSchema(version)) {
+                    try await store.load(from: url)
+                }
+            }
         }
     }
 

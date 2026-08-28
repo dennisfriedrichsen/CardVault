@@ -156,29 +156,67 @@ extension UIStateFixture {
 
     // MARK: - Preflight
 
-    private static var destinationPreflights: [DestinationPreflight] {
-        [DestinationPreflight(id: primaryDestinationID, label: "Primary", availableBytes: 812_000_000_000,
-                              requiredBytes: scanResult.totalBytes, fileSystem: "APFS"),
-         DestinationPreflight(id: backupDestinationID, label: "Backup", availableBytes: 240_000_000_000,
-                              requiredBytes: scanResult.totalBytes, fileSystem: "APFS")]
+    /// The preflight fixtures are the output of the real check, not hand-written
+    /// `PreflightIssue` values. Posing them by hand let them drift until every
+    /// message in the reference set described a check `Preflight.swift` does not
+    /// perform — the audit's baseline was a picture of an app that does not
+    /// exist. Deriving them means a wording change reaches the fixtures with the
+    /// code, and an invented warning cannot be posed at all.
+    ///
+    /// This does no I/O: both of `validate`'s probes are injected, so the result
+    /// is a pure function of the plan below.
+    private static func preflight(_ plan: TransferPlan,
+                                  capacity: @escaping @Sendable (URL) -> Int64?) -> PreflightResult {
+        TransferPreflightService(capacityProvider: capacity, readabilityProvider: { _ in true })
+            .validate(plan)
     }
 
-    static let readyPreflight = PreflightResult(destinations: destinationPreflights, issues: [])
+    private static let primaryRootPath = "/Volumes/Field Archive/Transfers"
+    private static let backupRootPath = "/Volumes/Backup Shuttle/Transfers"
 
-    static let warningPreflight = PreflightResult(
-        destinations: destinationPreflights,
-        issues: [PreflightIssue(code: "exfat.durability", severity: .warning,
-                                message: "The source is exFAT, which has weaker durability guarantees than APFS."),
-                 PreflightIssue(code: "backup.removable", severity: .warning,
-                                message: "The backup destination is removable. Keep it connected until verification finishes.")])
+    private static func plan(primary: VolumeIdentity, backup: VolumeIdentity) -> TransferPlan {
+        TransferPlan(id: transferID, name: "2026-08-26", mode: .preserveCard,
+                     sourceRootPath: "/Volumes/EOS_DIGITAL", sourceVolume: cardVolume,
+                     files: sourceFiles,
+                     destinations: [DestinationPlan(id: primaryDestinationID, label: "Primary",
+                                                    rootPath: primaryRootPath, volume: primary),
+                                    DestinationPlan(id: backupDestinationID, label: "Backup",
+                                                    rootPath: backupRootPath, volume: backup)])
+    }
 
-    static let blockedPreflight = PreflightResult(
-        destinations: [DestinationPreflight(id: primaryDestinationID, label: "Primary", availableBytes: 1_073_741_824,
-                                            requiredBytes: scanResult.totalBytes, fileSystem: "APFS")],
-        issues: [PreflightIssue(code: "capacity.insufficient", severity: .blocking,
-                                message: "Primary has 1 GB available and this transfer needs 2.36 GB plus a safety margin."),
-                 PreflightIssue(code: "exfat.durability", severity: .warning,
-                                message: "The source is exFAT, which has weaker durability guarantees than APFS.")])
+    /// Two partitions of one physical device. This is the warning worth showing:
+    /// both copies land on the same disk, so a single failure takes both, and
+    /// nothing about the paths says so.
+    private static let sharedDeviceBackupVolume = VolumeIdentity(
+        volumeUUID: UUID(uuidString: "8B0B4E3E-0000-4000-A000-000000000B03"),
+        resourceIdentifier: "disk5s3", displayName: "Backup Shuttle", fileSystem: "APFS",
+        isRemovable: false, isLocal: true, physicalStoreIdentifier: "disk5",
+        partitionIdentifier: "disk5s3", identitySource: .diskArbitration)
+
+    private static let independentPrimaryVolume = VolumeIdentity(
+        volumeUUID: primaryVolume.volumeUUID, resourceIdentifier: "disk5s2",
+        displayName: "Field Archive", fileSystem: "APFS", isRemovable: false, isLocal: true,
+        physicalStoreIdentifier: "disk5", partitionIdentifier: "disk5s2",
+        identitySource: .diskArbitration)
+
+    private static let roomyCapacity: @Sendable (URL) -> Int64? = { url in
+        url.path == primaryRootPath ? 812_000_000_000 : 240_000_000_000
+    }
+
+    static let readyPreflight = preflight(plan(primary: primaryVolume, backup: backupVolume),
+                                          capacity: roomyCapacity)
+
+    /// `same-device`: the destinations are independent folders on one disk.
+    static let warningPreflight = preflight(
+        plan(primary: independentPrimaryVolume, backup: sharedDeviceBackupVolume),
+        capacity: roomyCapacity)
+
+    /// `insufficient-space` on the primary, with the `same-device` warning still
+    /// standing behind it — so the blocked state shows both severities at once,
+    /// which is the layout the audit is actually checking.
+    static let blockedPreflight = preflight(
+        plan(primary: independentPrimaryVolume, backup: sharedDeviceBackupVolume),
+        capacity: { url in url.path == primaryRootPath ? 1_073_741_824 : 240_000_000_000 })
 
     // MARK: - Progress
 
@@ -220,13 +258,22 @@ extension UIStateFixture {
 
     private static let primaryURL = URL(filePath: "/Volumes/Field Archive/2026-08-26", directoryHint: .isDirectory)
     private static let backupURL = URL(filePath: "/Volumes/Backup Shuttle/2026-08-26", directoryHint: .isDirectory)
+    /// The staging shape, derived rather than spelled, so a fixture cannot
+    /// describe a tree the coordinator would not have written.
+    private static let layout = TransferLayout(transferID: transferID, transferName: "2026-08-26")
+    private static let primaryStagingURL = layout.stagingRoot(
+        in: URL(filePath: "/Volumes/Field Archive", directoryHint: .isDirectory))
+    private static let backupStagingURL = layout.stagingRoot(
+        in: URL(filePath: "/Volumes/Backup Shuttle", directoryHint: .isDirectory))
 
     static let verifiedOutcome = TransferOutcome(
         transferID: transferID, state: .verified,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: primaryURL),
+                                          failedFiles: 0, finalURL: primaryURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryURL)),
                        DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: backupURL)],
+                                          failedFiles: 0, finalURL: backupURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: backupURL))],
         safeToEject: true)
 
     /// A verified primary never masks a failed backup, so the fixture keeps both
@@ -234,27 +281,34 @@ extension UIStateFixture {
     static let partialOutcome = TransferOutcome(
         transferID: transferID, state: .partiallySuccessful,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 13,
-                                          failedFiles: 0, finalURL: primaryURL),
+                                          failedFiles: 0, finalURL: primaryURL,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryURL)),
+                       // The backup did not finish, so its record is still the
+                       // one in staging.
                        DestinationOutcome(id: backupDestinationID, label: "Backup", verifiedFiles: 9,
-                                          failedFiles: 4, finalURL: nil)],
+                                          failedFiles: 4, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: backupStagingURL))],
         safeToEject: true)
 
     static let needsAttentionOutcome = TransferOutcome(
         transferID: transferID, state: .needsAttention,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 7,
-                                          failedFiles: 6, finalURL: nil)],
+                                          failedFiles: 6, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true)
 
     static let failedOutcome = TransferOutcome(
         transferID: transferID, state: .failed,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 0,
-                                          failedFiles: 13, finalURL: nil)],
+                                          failedFiles: 13, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true)
 
     static let conflictOutcome = TransferOutcome(
         transferID: transferID, state: .needsAttention,
         destinations: [DestinationOutcome(id: primaryDestinationID, label: "Primary", verifiedFiles: 7,
-                                          failedFiles: 0, finalURL: nil)],
+                                          failedFiles: 0, finalURL: nil,
+                                          manifestURL: TransferLayout.manifestURL(inStaging: primaryStagingURL))],
         safeToEject: true,
         conflicts: [DestinationConflict(destinationID: primaryDestinationID, destinationLabel: "Primary",
                                         relativePath: "DCIM/100EOS_R/IMG_0435.CR3",
@@ -299,7 +353,7 @@ extension UIStateFixture {
         let destinations = [
             RecoveredDestination(id: primaryDestinationID, label: "Primary", recordedVolume: primaryVolume,
                                  root: URL(filePath: "/Volumes/Field Archive", directoryHint: .isDirectory),
-                                 stagingRoot: primaryURL, manifestURL: primaryURL.appending(path: ".cardvault/transfer-manifest.json"),
+                                 stagingRoot: primaryURL, manifestURL: TransferLayout.manifestURL(inStaging: primaryURL),
                                  match: .matched, bookmarkWasStale: false,
                                  copiedFiles: 7, verifiedFiles: 7, conflictedFiles: 0),
             RecoveredDestination(id: backupDestinationID, label: "Backup", recordedVolume: backupVolume,

@@ -13,7 +13,48 @@ final class AppModel {
     var destinationURL: URL?
     var backupURL: URL?
     var transferName = ""
-    var mode: TransferMode = .preserveCard
+    /// The mode outlives the launch it was chosen in, like the destination
+    /// selections do. Written through on every change rather than at quit, so a
+    /// crash or a force-quit cannot lose the choice. A posed model never writes:
+    /// a reference capture must not change the user's preferences.
+    var mode: TransferMode {
+        get {
+            access(keyPath: \.mode)
+            return storedMode
+        }
+        set {
+            withMutation(keyPath: \.mode) { storedMode = newValue }
+            guard !isPosed else { return }
+            modePreference.save(newValue)
+        }
+    }
+
+    @ObservationIgnored private var storedMode: TransferMode = .preserveCard
+
+    /// Persisted for the same reason the mode is: a display the user chose must
+    /// still be there next launch, because the ambiguity it resolves — several
+    /// folders sharing a name — is still there too.
+    var showsFullPaths: Bool {
+        get {
+            access(keyPath: \.showsFullPaths)
+            return storedShowsFullPaths
+        }
+        set {
+            withMutation(keyPath: \.showsFullPaths) { storedShowsFullPaths = newValue }
+            guard !isPosed else { return }
+            pathDisplayPreference.save(newValue)
+        }
+    }
+
+    @ObservationIgnored private var storedShowsFullPaths = false
+
+    /// How this launch names a folder on screen. Views ask the model rather than
+    /// reading a URL directly, so the setting cannot be honoured on one screen
+    /// and missed on another.
+    func pathLabel(for url: URL) -> String {
+        PathDisplay.label(for: url, showsFullPath: showsFullPaths)
+    }
+
     var scanResult: ScanResult?
     var preflight: PreflightResult?
     /// Copy and verification progress are tracked separately so a completed copy
@@ -42,6 +83,16 @@ final class AppModel {
         StatusPresentation.for(status, conflictCount: outcome?.conflicts.count ?? 0)
     }
     var errorMessage: String?
+
+    /// Why source, name, mode and destination selection are currently
+    /// unavailable, or nil when they can be changed. The running coordinator
+    /// already holds the plan it was started with, so an edit made while work is
+    /// under way would describe a transfer other than the one writing to disk.
+    var inputLockReason: String? {
+        guard isWorking else { return nil }
+        if status == .scanning { return "CardVault is scanning the source. Selections can change when the scan finishes." }
+        return "CardVault is busy. Selections cannot change until the current operation finishes."
+    }
 
     /// True from the moment the user asks to stop until the coordinator has
     /// finished unwinding. It gates the stop control and keeps late progress
@@ -83,6 +134,8 @@ final class AppModel {
     private let volumeDiscovery = VolumeDiscoveryService()
     private let ejectionService: DiskEjectionService = DiskArbitrationEjectionService()
     private let bookmarkStore: SecurityScopedBookmarkStore
+    @ObservationIgnored private let modePreference = TransferModePreference()
+    @ObservationIgnored private let pathDisplayPreference = FullPathDisplayPreference()
     private let historyStore: TransferHistoryStore
     private let recoveryCoordinator = RecoveryCoordinator()
     private let historyInspector = TransferHistoryInspector()
@@ -106,6 +159,11 @@ final class AppModel {
             .appending(path: "CardVault", directoryHint: .isDirectory)
         bookmarkStore = SecurityScopedBookmarkStore(storageURL: support.appending(path: "bookmarks.plist"))
         historyStore = TransferHistoryStore(url: support.appending(path: "transfer-history.json"))
+        // Restored here rather than in `refresh()` so the picker never shows a
+        // mode the app is not about to use, and so the scan `refresh()` starts
+        // for a restored source runs in the mode the user last chose.
+        storedMode = modePreference.load()
+        storedShowsFullPaths = pathDisplayPreference.load()
     }
 
     func chooseSource() {
@@ -128,7 +186,15 @@ final class AppModel {
         Task { try? await bookmarkStore.save(url: url, key: BookmarkKey.backup) }
         updatePreflight()
     }
-    func removeBackup() { backupURL = nil; updatePreflight() }
+    func removeBackup() {
+        backupURL = nil
+        backupAccess = nil
+        // Removing the backup has to outlive the window: the next refresh
+        // restores any empty selection from its saved bookmark, so leaving the
+        // bookmark behind puts back the destination the user just removed.
+        Task { try? await bookmarkStore.remove(key: BookmarkKey.backup) }
+        updatePreflight()
+    }
 
     func scan() {
         guard let sourceURL else { return }
@@ -141,10 +207,16 @@ final class AppModel {
             do {
                 let result = try await Task.detached { try SourceScanner().scan(root: sourceURL, mode: selectedMode) }.value
                 scanResult = result
+                // Preflight declines to speak while work is in flight, so the
+                // scan has to be over before it can replace "scanning" with the
+                // state the user acts on next.
+                isWorking = false
                 if result.files.isEmpty { setStatus(.noTransferableFiles) }
                 updatePreflight()
-            } catch { present(error, operation: "Scanning source") }
-            isWorking = false
+            } catch {
+                present(error, operation: "Scanning source")
+                isWorking = false
+            }
         }
     }
 
@@ -437,7 +509,10 @@ final class AppModel {
         let scan = await recoveryCoordinator.scan(destinationRoots: roots, sourceRoots: sources,
                                                   transferDestinationRoots: destinations)
         recovery = scan
-        if !scan.isEmpty { isPresentingRecovery = true }
+        // The sheet's only way out lives beside the transfers it lists, so a
+        // scan that has emptied out — the last transfer resumed or abandoned —
+        // would leave an empty sheet with nothing left to dismiss it.
+        isPresentingRecovery = !scan.isEmpty
     }
 
     func resume(_ transfer: RecoverableTransfer) {
@@ -549,12 +624,19 @@ final class AppModel {
         guard let outcome else { return }
         // Keyed by destination, so a manifest path is never recorded against
         // the wrong drive.
+        // A destination that did not finish still has a durable record, in its
+        // staging tree. Keying only off `finalURL` would leave history unable to
+        // name it, and a connected drive would be reported as not connected.
         let paths = outcome.destinations.reduce(into: [UUID: String]()) { paths, destination in
-            guard let url = destination.finalURL else { return }
-            paths[destination.id] = TransferLayout.manifestURL(inStaging: url).path
+            guard let url = destination.manifestURL else { return }
+            paths[destination.id] = url.path
         }
-        guard let first = paths.values.first,
-              let manifest = try? await ManifestStore().load(from: URL(filePath: first)) else { return }
+        // Read back from a destination that finished where there is one: its
+        // record is the furthest along, and the choice is not left to dictionary
+        // ordering.
+        guard let authority = outcome.destinations.first(where: { $0.finalURL != nil })?.manifestURL
+                ?? outcome.destinations.compactMap(\.manifestURL).first,
+              let manifest = try? await ManifestStore().load(from: authority) else { return }
         try? await historyStore.add(.init(manifest: manifest, manifestPaths: paths))
         history = await historyStore.all()
         await refreshHistoryDetail()

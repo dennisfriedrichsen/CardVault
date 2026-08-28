@@ -3,8 +3,14 @@ import CardVaultCore
 import SwiftUI
 
 struct SettingsView: View {
+    @Bindable var model: AppModel
     var body: some View {
         Form {
+            Section("Display") {
+                Toggle("Show full paths", isOn: $model.showsFullPaths)
+                Text("Folders are named by their last path component. Turn this on when several of them share a name and only the path tells them apart.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Integrity") {
                 LabeledContent("Verification", value: "SHA-256, every destination")
                 LabeledContent("Source policy", value: "Strictly read-only")
@@ -14,7 +20,7 @@ struct SettingsView: View {
                 Text("Transfer rate and remaining time are estimates. They never affect verification.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped).frame(width: 520, height: 260).padding()
+        }.formStyle(.grouped).frame(width: 520, height: 360).padding()
     }
 }
 
@@ -28,11 +34,17 @@ struct CardVaultCommands: Commands {
         // exists only on a toolbar button cannot be discovered, and Full Keyboard
         // Access users reach the menu bar first.
         CommandGroup(after: .newItem) {
-            Button("Choose Source…") { model.chooseSource() }.keyboardShortcut("o", modifiers: .command)
+            // Disabled for the same reason as the cards themselves: a plan that
+            // is already running cannot take a new source or destination.
+            Button("Choose Source…") { model.chooseSource() }
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(model.inputLockReason != nil)
             Button("Choose Primary Destination…") { model.choosePrimary() }
                 .keyboardShortcut("d", modifiers: .command)
+                .disabled(model.inputLockReason != nil)
             Button("Choose Backup Destination…") { model.chooseBackup() }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(model.inputLockReason != nil)
             Divider()
             Button("Start Transfer") { model.beginTransfer() }
                 .keyboardShortcut(.return, modifiers: .command)

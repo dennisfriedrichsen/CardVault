@@ -37,6 +37,11 @@ Each state links its light capture; the dark capture is the same name with
 | `ready` | [png](ui-states/ready-light.png) | `checkmark.circle` | neutral | Ready to transfer… |
 | `preflightWarning` | [png](ui-states/preflightWarning-light.png) | `exclamationmark.triangle.fill` | attention | Ready to transfer, with warnings… |
 | `preflightBlocked` | [png](ui-states/preflightBlocked-light.png) | `exclamationmark.octagon.fill` | blocked | Cannot start… Nothing has been copied. |
+
+> The `preflightWarning` and `preflightBlocked` images predate the correction of the preflight
+> fixtures, which used to pose two warnings the app cannot emit. Those two states now show real
+> `same-device` and `insufficient-space` output, so their layout and wrapping conclusions hold only
+> once the set is recaptured — the two rows above are the ones to look at first at the next audit.
 | `copying` | [png](ui-states/copying-light.png) | `doc.on.doc.fill` | in progress | Copying. Do not remove the card yet. |
 | `copyCompleteVerificationPending` | [png](ui-states/copyCompleteVerificationPending-light.png) | `hourglass.circle.fill` | in progress | Copy complete. Verification has not finished… |
 | `verifying` | [png](ui-states/verifying-light.png) | `checkmark.shield` | in progress | Verifying copied files. Do not remove the card yet. |
@@ -102,10 +107,16 @@ been dismissed.
     Bars now carry "*n* percent, *x* of *y* files", the copy/verify bar honours
     `accessibilityReduceMotion`, and the indeterminate scan spinner is replaced
     by the word "Scanning…" under reduced motion.
-13. **Half the keyboard paths existed only on toolbar buttons.** Menu items were
+13. **Source, name, mode and destinations stayed editable during a transfer.**
+    The running coordinator holds the plan it was started with, so an edit made
+    mid-transfer changed only the screen — the name field could read one thing
+    while a differently named folder was being written. Those three cards, the
+    toolbar's Choose Source, and the three Choose… menu items are now disabled
+    while an operation runs, with the reason written beneath the cards.
+14. **Half the keyboard paths existed only on toolbar buttons.** Menu items were
     added for every shortcut (see below), so they are discoverable and reachable
     from the menu bar.
-14. **A running transfer could not be stopped.** The coordinator has always
+15. **A running transfer could not be stopped.** The coordinator has always
     stopped cleanly on cancellation — discarding the partial write, recording
     `cancelled` in the manifest, leaving the transfer resumable — but nothing in
     the UI held the task, so the only way out of a mistaken transfer was to

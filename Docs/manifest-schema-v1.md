@@ -11,7 +11,10 @@ relative. Mount paths and security-scoped bookmark bytes are deliberately exclud
 Each file records its source and destination relative paths, media classification, size, relevant
 timestamps, source SHA-256, and an independent copy/verification result for every destination UUID.
 A file is verified only when the SHA-256 calculated by rereading a closed destination file equals
-the source SHA-256. The `verifiedAt` date is present only after required verification succeeds.
+the source SHA-256. The `verifiedAt` date is present only after required verification succeeds. The
+reread has to be one the finishing run performed: a resumed transfer rereads every `copied` and every
+`skipped` destination file it did not already read itself, so no destination is finalized on the
+strength of a digest an earlier run recorded and this one never confirmed.
 
 ## Duplicate and conflict classification
 
@@ -30,6 +33,34 @@ with one `warnings` entry per conflict until the user resolves it.
 Only source checksums are compared across manifests, because they do not depend on which tree a copy
 landed in. A record from another manifest is consulted only if that manifest's `schemaVersion` is one
 this build supports, and it still has to agree with a fresh read of the bytes on disk.
+
+## Source timestamps on destination copies
+
+A destination result may additionally carry a `timestamps` value recording what became of the
+source's dates on that copy: `creationDate` and `modificationDate`, each one of `pending`, `applied`,
+`unrecorded`, `unsupported`, or `failed`, plus an `error` string when something was refused. The
+field is additive and absent in manifests written before it existed, so `schemaVersion` remains 1.
+
+The modification date is the one every other tool sorts by, and it can be written on every
+destination format CardVault supports, including NFS. The creation date is best effort: whether the
+destination stores one at all is measured once per destination, by writing a birth time to a probe
+file and reading it back, so a mount that keeps no birth times records `unsupported` rather than
+producing one notice per file. `unrecorded` means the source never carried that date.
+
+Dates are metadata, not content, and are held to a weaker promise than the bytes. Applying them never
+changes `verification`, never removes or rewrites a copy, and never fails a transfer: a file whose
+SHA-256 matches the source is verified whether or not its dates could be written. A `failed` date is
+summarised as one `warnings` entry per destination, counting the files affected. A read-back is
+compared within the destination file system's own granularity, which is two seconds on FAT-family
+volumes, so their expected truncation is not reported as a shortfall.
+
+Timestamps are reapplied on resume for files an earlier run copied, because the manifest holds the
+source dates regardless of which run wrote the file; without that, an interrupted transfer would
+produce an archive where a file's date depended on which run copied it. Directory dates are out of
+scope: they are not scanned, not recorded, and a destination directory carries its copy time.
+
+Writing dates to a destination copy is not a source modification. The source is still never written
+to, renamed, reorganised, or annotated.
 
 ## Relaunch recovery
 
@@ -50,10 +81,17 @@ a drive that was lost.
 describes stay on disk; the marker only stops recovery from offering the transfer again. It is
 additive, so `schemaVersion` remains 1. Abandoning never removes a source file, a verified file, a
 file awaiting a conflict decision, or anything CardVault did not write; only artifacts this manifest
-recorded as `copying` or `failed` may be removed, and only when the user asks for that explicitly.
+recorded as `copying` or `failed` may be removed, and only when the user asks for that explicitly —
+and only where the path it names resolves inside that transfer's own staging tree.
 
 A manifest this build cannot decode, and one whose `schemaVersion` is newer than this build supports,
-are both reported to the user and never restarted.
+are both reported to the user and never restarted. So is one whose `schemaVersion` is below 1, and one
+carrying a `relativeSourcePath` or `relativeDestinationPath` that is empty, absolute, holds a NUL, or
+contains a `..` component. The manifest lives on removable media and is writable by anything with
+access to the drive, while the paths in it are joined onto a destination root and then deleted from
+and written to; a path that could leave the transfer's own tree makes the record untrustworthy as a
+whole, so it is reported rather than acted on. Every site that turns one of those paths into a file
+operation checks containment again, so the guarantee does not rest on decoding alone.
 
 Updates are written to a sibling temporary file, then replace the current manifest. The preceding
 valid manifest is retained as `transfer-manifest.json.previous` for recovery from a damaged update.

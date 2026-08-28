@@ -33,7 +33,9 @@ public enum InterruptedOperation: String, Sendable {
         case .copyComplete: self = .recordingCopyCompletion
         case .verifying: self = .verifyingFiles
         case .needsAttention: self = .awaitingConflictResolution
-        case .verified, .partiallySuccessful, .failed: self = .finalizing
+        // `.safeToEject` on a staging tree is a record an older build wrote
+        // over the outcome; the tree it describes never finished being moved.
+        case .verified, .partiallySuccessful, .failed, .safeToEject: self = .finalizing
         // Nothing went wrong here, and recovery saying "Unknown" about a
         // transfer the user deliberately stopped reads as a fault report.
         case .cancelled: self = .stoppedByUser
@@ -200,13 +202,31 @@ public struct RecoveryInspection: Sendable, Identifiable {
 /// What abandoning would touch, computed before anything is removed so the user
 /// is never asked to approve a deletion they cannot see.
 public struct AbandonPlan: Sendable {
-    /// Partial artifacts CardVault itself recorded as unfinished. These are the
-    /// only files it is ever entitled to delete.
+    /// Partial artifacts CardVault itself recorded as unfinished, each of them
+    /// inside the transfer's own staging tree. These are the only files it is
+    /// ever entitled to delete.
     public let removableIncompleteArtifacts: [URL]
+    /// The same list as the user reads it: "Backup — DCIM/IMG_0435.CR3". The
+    /// dialog shows these, because a count cannot be checked and a path can.
+    public let removableDescriptions: [String]
     public let verifiedFilesKept: Int
     public let conflictedFilesKept: Int
     public let manifestsKept: [URL]
+    /// Records naming a path outside the transfer's tree. Never removed, and
+    /// surfaced so a tampered or damaged manifest is visible rather than silent.
+    public let refusedPaths: [String]
     public var removesNothing: Bool { removableIncompleteArtifacts.isEmpty }
+
+    public init(removableIncompleteArtifacts: [URL], removableDescriptions: [String],
+                verifiedFilesKept: Int, conflictedFilesKept: Int, manifestsKept: [URL],
+                refusedPaths: [String] = []) {
+        self.removableIncompleteArtifacts = removableIncompleteArtifacts
+        self.removableDescriptions = removableDescriptions
+        self.verifiedFilesKept = verifiedFilesKept
+        self.conflictedFilesKept = conflictedFilesKept
+        self.manifestsKept = manifestsKept
+        self.refusedPaths = refusedPaths
+    }
 }
 
 public struct AbandonOutcome: Sendable {
@@ -258,8 +278,11 @@ public actor RecoveryCoordinator {
                 guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
                 do {
                     let manifest = try await manifestStore.load(from: manifestURL)
-                    // An abandoned or finished transfer is a record, not an offer.
-                    guard manifest.abandonedAt == nil, manifest.state != .safeToEject else { continue }
+                    // An abandoned transfer is a record, not an offer. Nothing
+                    // else is tested here: this is a staging directory, and a
+                    // staging directory that still exists is by definition an
+                    // unfinished transfer, whatever state its manifest names.
+                    guard manifest.abandonedAt == nil else { continue }
                     found[manifest.transferID, default: []].append((root, staging, manifest))
                 } catch {
                     unreadable.append(UnreadableTransfer(
@@ -358,6 +381,8 @@ public actor RecoveryCoordinator {
     /// on, and anything CardVault did not write are all left alone.
     public nonisolated func abandonPlan(for transfer: RecoverableTransfer) -> AbandonPlan {
         var removable: [URL] = []
+        var descriptions: [String] = []
+        var refused: [String] = []
         var verified = 0
         var conflicted = 0
         for file in transfer.manifest.files {
@@ -367,13 +392,23 @@ public actor RecoveryCoordinator {
                 if result.copyState == .conflicted { conflicted += 1; continue }
                 guard result.copyState == .copying || result.copyState == .failed,
                       let staging = destination.stagingRoot else { continue }
-                removable.append(TransferLayout.originalsRoot(inStaging: staging)
-                    .appending(path: file.relativeDestinationPath))
+                // The `copyState` that authorises this deletion comes from the
+                // same document as the path, so the path is checked against the
+                // tree rather than trusted along with it.
+                guard let url = TransferLayout.containedURL(
+                    relativePath: file.relativeDestinationPath,
+                    under: TransferLayout.originalsRoot(inStaging: staging)) else {
+                    refused.append("\(destination.label) — \(file.relativeDestinationPath)")
+                    continue
+                }
+                removable.append(url)
+                descriptions.append("\(destination.label) — \(file.relativeDestinationPath)")
             }
         }
-        return AbandonPlan(removableIncompleteArtifacts: removable,
+        return AbandonPlan(removableIncompleteArtifacts: removable, removableDescriptions: descriptions,
                            verifiedFilesKept: verified, conflictedFilesKept: conflicted,
-                           manifestsKept: transfer.destinations.compactMap(\.manifestURL))
+                           manifestsKept: transfer.destinations.compactMap(\.manifestURL),
+                           refusedPaths: refused)
     }
 
     /// Marks the transfer abandoned so recovery stops offering it. The source is
@@ -531,6 +566,11 @@ public actor RecoveryCoordinator {
         switch error {
         case ManifestError.unsupportedSchema(let version):
             "The manifest uses schema version \(version), which this version of CardVault cannot read."
+        case ManifestError.invalidSchema(let version):
+            "The manifest declares schema version \(version), which no version of CardVault wrote."
+        case ManifestError.unsafePath(let path):
+            "The manifest names a file path (\(path)) that leads outside the transfer's own folder, "
+                + "so this record cannot be trusted and nothing was acted on."
         case ManifestError.noValidManifest:
             "No readable manifest was found for this transfer."
         default:

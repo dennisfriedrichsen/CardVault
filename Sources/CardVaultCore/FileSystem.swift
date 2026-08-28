@@ -28,6 +28,40 @@ public enum FileSystemError: Error, Equatable, Sendable {
     case unexpectedEndOfFile(String)
     case existingConflict(String)
     case sourceChanged(String)
+    /// The destination's format caps file size below what the source file needs.
+    /// Preflight blocks this before any copying starts; reaching it at runtime
+    /// means the destination changed after preflight ran.
+    case fileTooLargeForFormat(String, byteCount: Int64)
+}
+
+/// These reach the user through `localizedDescription`, so every case says what
+/// happened in a sentence. Without this a failure renders as "FileSystemError
+/// error 7", which tells the user nothing about whether their files are safe.
+extension FileSystemError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .injected(let operation, let name):
+            "A simulated \(operation) fault stopped work on \(name)"
+        case .disconnected(let operation, let name):
+            "The volume disconnected during \(operation) of \(name)"
+        case .permissionDenied(let operation, let name):
+            "CardVault was not allowed to \(operation) \(name)"
+        case .destinationFull(let name):
+            "The destination ran out of space writing \(name)"
+        case .shortRead(let name, let bytesRead):
+            "Reading \(name) ended early after \(bytesRead.formatted(.byteCount(style: .file)))"
+        case .shortWrite(let name, let bytesWritten):
+            "Writing \(name) ended early after \(bytesWritten.formatted(.byteCount(style: .file)))"
+        case .unexpectedEndOfFile(let name):
+            "\(name) ended sooner than its recorded size"
+        case .existingConflict(let path):
+            "\(path) already exists, and CardVault never overwrites existing content"
+        case .sourceChanged(let name):
+            "\(name) changed on the card while it was being read"
+        case .fileTooLargeForFormat(let name, let byteCount):
+            "\(name) is \(byteCount.formatted(.byteCount(style: .file))), which is larger than the destination's format can store in one file"
+        }
+    }
 }
 
 extension FaultKind {
@@ -232,8 +266,98 @@ public actor LocalFileSystem {
             guard copied == expectedSize else { throw FileSystemError.sourceChanged(source.lastPathComponent) }
         } catch {
             try? fileManager.removeItem(at: destination)
-            throw error
+            throw Self.named(error, copying: source, expectedSize: expectedSize)
         }
+    }
+
+    /// Whether this file system stores a creation date at all, measured by
+    /// writing one and reading it back. Asked once per destination: NFS accepts
+    /// the write, reports success, and keeps a zero birth time forever, and that
+    /// is a property of the mount rather than of any one file.
+    public func supportsCreationDates(in directory: URL) async -> Bool {
+        let probe = directory.appending(path: ".cardvault-timestamp-probe-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: probe) }
+        guard fileManager.createFile(atPath: probe.path, contents: nil) else { return false }
+        // A date far from both the epoch and now, so a file system that silently
+        // keeps zero or the current time cannot pass by coincidence.
+        let reference = Date(timeIntervalSince1970: 1_000_000_000)
+        do {
+            try fileManager.setAttributes([.creationDate: reference], ofItemAtPath: probe.path)
+            let values = try URL(filePath: probe.path).resourceValues(forKeys: [.creationDateKey])
+            guard let readBack = values.creationDate else { return false }
+            return abs(readBack.timeIntervalSince(reference)) <= TimestampTolerance.fatGranularity
+        } catch {
+            return false
+        }
+    }
+
+    /// Carries the source's dates onto a destination copy and confirms them by
+    /// reading them back. This never removes or rewrites the file: a date that
+    /// will not stick is reported in the returned outcome, and the caller is
+    /// expected to keep the verified bytes exactly as they are.
+    public func applyTimestamps(to url: URL, creationDate: Date?, modificationDate: Date?,
+                                creationDatesSupported: Bool,
+                                tolerance: TimeInterval) async throws -> TimestampOutcome {
+        try await injector?.check(.attributes, url: url)
+        var outcome = TimestampOutcome()
+        var failure: Error?
+
+        if creationDate == nil {
+            outcome.creationDate = .unrecorded
+        } else if !creationDatesSupported {
+            outcome.creationDate = .unsupported
+        }
+        if modificationDate == nil { outcome.modificationDate = .unrecorded }
+
+        // Creation first, so that a file system which touches the modification
+        // time as a side effect of the birth-time write cannot undo the date
+        // that actually matters.
+        if outcome.creationDate == .pending, let creationDate {
+            do { try fileManager.setAttributes([.creationDate: creationDate], ofItemAtPath: url.path) }
+            catch { outcome.creationDate = .failed; failure = error }
+        }
+        if outcome.modificationDate == .pending, let modificationDate {
+            do { try fileManager.setAttributes([.modificationDate: modificationDate], ofItemAtPath: url.path) }
+            catch { outcome.modificationDate = .failed; failure = error }
+        }
+
+        // Read back from a fresh URL: resource values are cached per instance,
+        // and a cached answer would confirm nothing.
+        let values = try? URL(filePath: url.path)
+            .resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        if outcome.creationDate == .pending, let creationDate {
+            outcome.creationDate = agrees(values?.creationDate, creationDate, tolerance) ? .applied : .failed
+        }
+        if outcome.modificationDate == .pending, let modificationDate {
+            outcome.modificationDate = agrees(values?.contentModificationDate, modificationDate, tolerance)
+                ? .applied : .failed
+        }
+        if outcome.hasFailure, let failure { outcome.error = String(describing: failure) }
+        return outcome
+    }
+
+    private func agrees(_ readBack: Date?, _ expected: Date, _ tolerance: TimeInterval) -> Bool {
+        guard let readBack else { return false }
+        return abs(readBack.timeIntervalSince(expected)) <= tolerance
+    }
+
+    /// `EFBIG` is the destination format refusing the file's size outright — FAT
+    /// cannot hold 4 GiB or more — and it arrives as a bare POSIX error, which
+    /// would surface to the user as "File too large" with nothing said about the
+    /// destination being the cause. Preflight blocks this case, so reaching it
+    /// means the destination changed underneath us; it still has to explain
+    /// itself when it does.
+    private static func named(_ error: Error, copying source: URL, expectedSize: Int64) -> Error {
+        guard posixCode(of: error) == EFBIG else { return error }
+        return FileSystemError.fileTooLargeForFormat(source.lastPathComponent, byteCount: expectedSize)
+    }
+
+    private static func posixCode(of error: Error) -> Int32? {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain { return Int32(nsError.code) }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain { return Int32(underlying.code) }
+        return nil
     }
 
     public func move(_ source: URL, to destination: URL) async throws {

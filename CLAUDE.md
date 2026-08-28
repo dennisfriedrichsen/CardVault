@@ -39,10 +39,12 @@ target is macOS 26.
 
 CardVault ingests, verifies, recovers, records, and safely ejects. It never deletes, renames,
 reorganizes, or writes metadata to a source, never erases or formats media, and never says a card is
-safe to erase — only that it is safe to eject. Browsing, culling, ratings, and analytics belong to
-SDelight, a separate app CardVault can optionally hand a verified destination to
-(`ExternalHandoff.swift`). Reject work that crosses this line rather than implementing it.
-`Docs/prompt.txt` is the originating specification.
+safe to erase — only that it is safe to eject. Writing metadata to a *destination* copy CardVault
+itself created — carrying the source's dates onto it — is on the right side of that line; the source
+is still never written to. Browsing, culling, ratings, and analytics belong to SDelight, a separate
+app CardVault can optionally hand a verified destination to (`ExternalHandoff.swift`). Reject work
+that crosses this line rather than implementing it. `Docs/prompt.txt` is the originating
+specification.
 
 ## Architecture
 
@@ -72,6 +74,10 @@ Load-bearing pieces and why they exist:
   destination by display name or mount path alone.
 - **`Conflicts.swift`** — classifies existing destination content. Existing final or unrelated files are
   never overwritten; a conflict pauses the transfer before verification and waits for a decision.
+- **`Timestamps.swift`** — carrying the source's dates onto destination copies. Dates are metadata,
+  held to a weaker promise than bytes: applied best effort, recorded per file in the manifest, and
+  never allowed to fail a copy whose digest matched. Creation-date support is measured once per
+  destination, because a mount that stores none would otherwise report the same fact per file.
 - **`ProgressAggregation.swift`** — precise counters live on the coordinator; only throttled snapshots
   reach handlers. Copy and verification progress stay separate so a finished copy can never render as a
   finished transfer.
@@ -92,8 +98,12 @@ recovery can reach a months-old transfer's roots after the last-used selections 
   disconnected drive is never presented as unverified.
 - Tests use swift-testing (`@Suite`/`@Test`/`#expect`), not XCTest.
 - Filesystem semantics differ by format — APFS/HFS+ support the same-volume atomic rename used for
-  finalization; exFAT has weaker durability and naming limits and is checked in preflight. Finalization
-  never assumes a cross-volume move works.
+  finalization; exFAT has weaker durability. Compare formats through `VolumeFormat`, never by matching
+  `VolumeIdentity.fileSystem` as a string: it holds a Disk Arbitration volume kind (`exfat`, `msdos`)
+  when Disk Arbitration resolved it and locale-dependent text (`MS-DOS (FAT32)`) when it did not.
+  Finalization never assumes a cross-volume move works. Case sensitivity is not a format at all —
+  APFS and HFS+ each come in both variants — so it is measured at the destination mount rather than
+  inferred from either the kind or the label.
 
 ## Docs
 
@@ -103,6 +113,8 @@ recovery can reach a months-old transfer's roots after the last-used selections 
 
 `ui-state-audit.md` is the accessibility and layout audit of the principal UI states, with
 `Docs/ui-states/` as its reference screenshots and `ui-state-capture.md` as the one command that
-regenerates them. Changing anything the user sees means re-running that capture and reviewing the
-diff. The states themselves are named in `StatusPresentation.swift` and posed by
+regenerates them. The capture is audit equipment, not a per-change chore: re-run it when actually
+auditing the UI, not on every change or PR that happens to touch a view. The screenshots are evidence
+for the audit's prose; no test reads them, so a stale row in a picker costs nothing until the next
+audit reads it. The states themselves are named in `StatusPresentation.swift` and posed by
 `UIStateFixtures.swift`; a new user-visible state belongs in both, or it drops out of the audit.

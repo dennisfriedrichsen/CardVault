@@ -42,6 +42,60 @@ struct RecoveryTests {
         }
     }
 
+    /// The failure mode CardVault exists to prevent: the transfer whose backup
+    /// did not finish must still be there at the next launch. `.safeToEject`
+    /// describes the card, so it belongs only in the record of a destination
+    /// that actually finished.
+    @Test("A destination that did not finish keeps its own state and is offered again")
+    func partiallySuccessfulTransferIsOfferedForRecovery() async throws {
+        try await withFixture(fileCount: 2, destinationCount: 2) { fixture in
+            // The backup drive refuses the second file aimed at it.
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "destination-1", after: 1, effect: .fail(.deviceFull))
+            ])
+            let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(injector: injector))
+                .execute(plan: fixture.plan)
+            #expect(outcome.state == .partiallySuccessful)
+            #expect(outcome.destinations[0].isVerified)
+            #expect(!outcome.destinations[1].isVerified)
+
+            // The primary finished, so its record says the card can go. The
+            // backup's record still says what happened to the backup.
+            #expect(try await fixture.finalManifest(0).state == .safeToEject)
+            #expect(try await fixture.finalManifest(1).state == .partiallySuccessful)
+
+            // And the unfinished backup can still be named, which is what
+            // history needs to report a connected drive as connected.
+            let staging = fixture.stagingRoot(1)
+            #expect(outcome.destinations[1].manifestURL == TransferLayout.manifestURL(inStaging: staging))
+            #expect(FileManager.default.fileExists(atPath: staging.path))
+
+            let scan = await fixture.coordinator().scan(destinationRoots: fixture.destinationRoots)
+            #expect(scan.transfers.count == 1)
+            let transfer = try #require(scan.transfers.first)
+            #expect(transfer.lastDurableState == .partiallySuccessful)
+            #expect(transfer.verifiedFiles < transfer.totalFiles)
+        }
+    }
+
+    /// A transfer where nothing verified is not a finished transfer either.
+    @Test("A transfer where every destination failed is still offered")
+    func failedTransferIsOffered() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "destination-", effect: .fail(.deviceFull), repeats: true)
+            ])
+            let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(injector: injector))
+                .execute(plan: fixture.plan)
+            #expect(outcome.state == .failed)
+            #expect(try await fixture.finalManifest(0).state == .failed)
+            let transfer = try #require(await fixture.coordinator()
+                .scan(destinationRoots: fixture.destinationRoots).transfers.first)
+            #expect(transfer.lastDurableState == .failed)
+            #expect(transfer.interruptedOperation == .finalizing)
+        }
+    }
+
     @Test("The durable state, progress, and failed operation are all presented")
     func presentsDurableProgress() async throws {
         try await withFixture(fileCount: 3) { fixture in
@@ -115,6 +169,142 @@ struct RecoveryTests {
             let scan = await fixture.coordinator().scan(destinationRoots: fixture.destinationRoots)
             #expect(scan.unreadable.isEmpty)
             #expect(scan.transfers.count == 1)
+        }
+    }
+
+    // MARK: - Untrusted manifest paths
+
+    /// The manifest is a document on removable media. A path in it that walks
+    /// out of the transfer's own tree makes recovery delete and overwrite a file
+    /// that has nothing to do with CardVault, so such a record is reported
+    /// rather than acted on.
+    @Test("A manifest naming a path outside the transfer is reported, not acted on")
+    func manifestWithEscapingPathIsUnreadable() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].relativeDestinationPath = "../../../earlier-import.jpg"
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            let scan = await fixture.coordinator().scan(destinationRoots: fixture.destinationRoots)
+            #expect(scan.transfers.isEmpty)
+            #expect(scan.unreadable.count == 1)
+            #expect(scan.unreadable[0].reason.contains("outside"))
+            // Not a "newer CardVault" problem, so it must not tell the user to update.
+            #expect(!scan.unreadable[0].isUnsupportedSchema)
+        }
+    }
+
+    @Test("Resume refuses a tampered manifest instead of overwriting outside the tree")
+    func resumeRefusesEscapingPath() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let victim = fixture.root.appending(path: "earlier-import.jpg")
+            let victimBytes = Data(repeating: 0xEE, count: 4_096)
+            try victimBytes.write(to: victim)
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].relativeDestinationPath = "../../../earlier-import.jpg"
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            await #expect(throws: (any Error).self) {
+                try await TransferCoordinator().resume(plan: fixture.plan,
+                                                       manifestURL: try fixture.stagingManifestURL())
+            }
+            #expect(FileManager.default.fileExists(atPath: victim.path), "an unrelated file was removed")
+            #expect(try Data(contentsOf: victim) == victimBytes, "an unrelated file was overwritten")
+        }
+    }
+
+    /// Decoding is not the only guard: a path is checked again where it becomes
+    /// a file operation, so no future caller can be the one that forgot.
+    @Test("A destination path leading out of the tree is refused rather than written")
+    func copyRefusesEscapingDestinationPath() async throws {
+        try await withFixture(fileCount: 1) { fixture in
+            let victim = fixture.root.appending(path: "victim.jpg")
+            let victimBytes = Data(repeating: 0xAB, count: 512)
+            try victimBytes.write(to: victim)
+            let plan = TransferPlan(name: "Escaping", mode: .preserveCard, sourceRootPath: fixture.source.path,
+                                    sourceVolume: fixture.plan.sourceVolume,
+                                    files: [SourceFile(relativePath: "../victim.jpg", byteCount: 512,
+                                                       mediaKind: .jpeg)],
+                                    destinations: fixture.plan.destinations)
+
+            let outcome = try await TransferCoordinator().execute(plan: plan)
+            #expect(!outcome.destinations[0].isVerified)
+            #expect(try Data(contentsOf: victim) == victimBytes)
+        }
+    }
+
+    @Test("Abandon removes nothing outside the staging tree")
+    func abandonRefusesEscapingPath() async throws {
+        try await withFixture(fileCount: 1) { fixture in
+            let victim = fixture.root.appending(path: "irreplaceable.jpg")
+            try Data(repeating: 0xAB, count: 1_024).write(to: victim)
+            let destinationID = fixture.plan.destinations[0].id
+            // Built in memory, so the point-of-use guard is what is under test
+            // rather than the check on decode.
+            var manifest = TransferManifest(plan: fixture.plan)
+            manifest.state = .copying
+            manifest.files[0].relativeDestinationPath = "../../../irreplaceable.jpg"
+            manifest.files[0].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            let staging = fixture.stagingRoot()
+            let transfer = RecoverableTransfer(
+                manifest: manifest,
+                source: RecoveredSource(recordedVolume: manifest.source, root: fixture.source,
+                                        match: .matched, bookmarkWasStale: false),
+                destinations: [RecoveredDestination(
+                    id: destinationID, label: "Primary", recordedVolume: fixture.plan.destinations[0].volume,
+                    root: fixture.destinationRoots[0], stagingRoot: staging,
+                    manifestURL: TransferLayout.manifestURL(inStaging: staging),
+                    match: .matched, bookmarkWasStale: false,
+                    copiedFiles: 0, verifiedFiles: 0, conflictedFiles: 0)])
+
+            let coordinator = fixture.coordinator()
+            let plan = coordinator.abandonPlan(for: transfer)
+            for url in plan.removableIncompleteArtifacts {
+                #expect(url.standardizedFileURL.path.hasPrefix(staging.standardizedFileURL.path + "/"))
+            }
+            #expect(plan.removableIncompleteArtifacts.isEmpty)
+            #expect(plan.refusedPaths.count == 1)
+
+            _ = await coordinator.abandon(transfer, removingIncompleteArtifacts: true)
+            #expect(FileManager.default.fileExists(atPath: victim.path),
+                    "a file outside the transfer was deleted")
+        }
+    }
+
+    /// The abandon dialog promises the user can see what it will remove, so the
+    /// plan carries the paths and not only how many there are.
+    @Test("The abandon plan names the files it would remove")
+    func abandonPlanNamesItsRemovals() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[1].destinations[destinationID] = DestinationFileResult(copyState: .copying)
+            }
+            try fixture.placePartialFile("second.CR3")
+            let coordinator = fixture.coordinator()
+            let transfer = try #require(await coordinator
+                .scan(destinationRoots: fixture.destinationRoots).transfers.first)
+            let plan = coordinator.abandonPlan(for: transfer)
+            #expect(plan.removableDescriptions.count == plan.removableIncompleteArtifacts.count)
+            #expect(plan.removableDescriptions.contains { $0.contains("DCIM/second.CR3") && $0.contains("Primary") })
+            #expect(plan.refusedPaths.isEmpty)
+        }
+    }
+
+    /// A manifest that says nothing about a destination says nothing good about
+    /// it either: the file has not been verified there.
+    @Test("A file with no record for a destination is not counted as verified")
+    func missingDestinationRecordIsNotASuccess() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { manifest, _ in
+                manifest.files[0].destinations = [:]
+            }
+            let outcome = try await fixture.resume()
+            #expect(outcome.state == .failed)
+            #expect(!outcome.destinations[0].isVerified)
+            #expect(outcome.destinations[0].verifiedFiles == 1)
+            #expect(outcome.destinations[0].failedFiles == 1)
+            // Nothing was finalized, so the transfer is still recoverable.
+            #expect(FileManager.default.fileExists(atPath: fixture.stagingRoot().path))
         }
     }
 
@@ -234,17 +424,84 @@ struct RecoveryTests {
                     DestinationFileResult(copyState: .copied, verification: .pending)
             }
             try fixture.placeCopiedFile("first.CR3")
-            let before = try fixture.identity(ofStagedFile: "first.CR3")
+            let before = try fixture.inode(ofStagedFile: "first.CR3")
 
             let outcome = try await fixture.resume()
             #expect(outcome.state == .verified)
-            // Same inode and same creation date: the bytes were reread, not rewritten.
-            #expect(try fixture.identity(ofStagedFile: "first.CR3") == before)
+            // Same inode: the bytes were reread, not rewritten.
+            #expect(try fixture.inode(ofStagedFile: "first.CR3") == before)
 
             let manifest = try await fixture.finalManifest()
             let result = try #require(manifest.files[0].destinations[fixture.plan.destinations[0].id])
             #expect(result.verification == .verified)
             #expect(result.destinationChecksum == digest)
+        }
+    }
+
+    /// A `.skipped` file is one an earlier run satisfied by rereading bytes that
+    /// were already there. However long ago that run was, this one has not read
+    /// them, so it cannot finalise the destination on the strength of that claim.
+    @Test("Resume does not finalize a skipped file it never read as verified")
+    func resumeRechecksSkippedFiles() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let digest = try await fixture.digest(of: "first.CR3")
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].sourceChecksum = digest
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(
+                    copyState: .skipped, verification: .verified,
+                    destinationChecksum: digest, conflict: .contentIdentical)
+            }
+            // Whatever that claim rested on is not on the destination any more.
+            #expect(!FileManager.default.fileExists(atPath: fixture.stagedURL("first.CR3").path))
+
+            let outcome = try await fixture.resume()
+            #expect(!outcome.destinations[0].isVerified)
+            #expect(outcome.state != .verified)
+            let result = try #require(await fixture.finalManifest()
+                .files[0].destinations[fixture.plan.destinations[0].id])
+            #expect(result.verification == .failed)
+        }
+    }
+
+    @Test("A skipped file that is still there is reread rather than rewritten")
+    func resumeVerifiesIntactSkippedFile() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            let digest = try await fixture.digest(of: "first.CR3")
+            try await fixture.seedStaging(state: .copying) { manifest, destinationID in
+                manifest.files[0].sourceChecksum = digest
+                manifest.files[0].destinations[destinationID] = DestinationFileResult(
+                    copyState: .skipped, verification: .verified,
+                    destinationChecksum: digest, conflict: .contentIdentical)
+            }
+            try fixture.placeCopiedFile("first.CR3")
+            let before = try fixture.inode(ofStagedFile: "first.CR3")
+
+            let outcome = try await fixture.resume()
+            #expect(outcome.state == .verified)
+            // Same inode: confirming a skipped file is a read, never a rewrite.
+            #expect(try fixture.inode(ofStagedFile: "first.CR3") == before)
+        }
+    }
+
+    /// Rereading is owed to a claim from an earlier run, not to one this run
+    /// made itself: the classifier established this file by hashing the bytes on
+    /// disk minutes ago, and paying for that read twice buys nothing.
+    @Test("A file this run satisfied by reading it is not read again")
+    func skipEstablishedThisRunIsNotRereadTwice() async throws {
+        try await withFixture(fileCount: 2) { fixture in
+            try await fixture.seedStaging(state: .copying) { _, _ in }
+            // Bytes already at the destination path that no manifest record
+            // claims, so the classifier has to read them to satisfy the file.
+            try fixture.placeCopiedFile("first.CR3")
+            // One read per file in the staging tree is the budget: the
+            // classifier's for the file already there, verification's for the
+            // file this run copies. A third read fails.
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: TransferLayout.incompleteMarker, after: 2, repeats: true)
+            ])
+            let outcome = try await fixture.resume(fileSystem: LocalFileSystem(injector: injector))
+            #expect(outcome.state == .verified)
+            #expect(outcome.destinations[0].verifiedFiles == 2)
         }
     }
 
@@ -261,14 +518,14 @@ struct RecoveryTests {
             }
             try fixture.placeCopiedFile("first.CR3")
             try fixture.placePartialFile("second.CR3")
-            let verifiedBefore = try fixture.identity(ofStagedFile: "first.CR3")
+            let verifiedBefore = try fixture.inode(ofStagedFile: "first.CR3")
             let partialBefore = try fixture.identity(ofStagedFile: "second.CR3")
 
             let outcome = try await fixture.resume()
             #expect(outcome.state == .verified)
             #expect(outcome.destinations[0].verifiedFiles == 2)
             // The verified file was never rewritten.
-            #expect(try fixture.identity(ofStagedFile: "first.CR3") == verifiedBefore)
+            #expect(try fixture.inode(ofStagedFile: "first.CR3") == verifiedBefore)
             // The partial one was replaced and now holds the whole source.
             #expect(try fixture.identity(ofStagedFile: "second.CR3") != partialBefore)
             #expect(try fixture.stagedContents("second.CR3") == fixture.contents("second.CR3"))
@@ -517,6 +774,14 @@ private struct RecoveryFixture {
         return try await LocalFileSystem().checksum(url, expectedSize: Int64(size))
     }
 
+    /// The one attribute that proves a file was not rewritten. Dates are no
+    /// longer usable for that: a resumed transfer deliberately reapplies the
+    /// source's dates to files an earlier run copied.
+    func inode(ofStagedFile name: String, index: Int = 0) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: stagedURL(name, index: index).path)
+        return attributes[.systemFileNumber] as? Int ?? -1
+    }
+
     func identity(ofStagedFile name: String, index: Int = 0) throws -> FileIdentity {
         let attributes = try FileManager.default.attributesOfItem(atPath: stagedURL(name, index: index).path)
         return FileIdentity(inode: attributes[.systemFileNumber] as? Int ?? -1,
@@ -558,14 +823,15 @@ private struct RecoveryFixture {
     }
 
     /// The full relaunch path: discover, rebuild the plan, resume.
-    func resume() async throws -> TransferOutcome {
+    func resume(fileSystem: LocalFileSystem = LocalFileSystem()) async throws -> TransferOutcome {
         let recovery = coordinator()
         let scan = await recovery.scan(destinationRoots: destinationRoots,
                                        sourceRoots: [plan.id: .unscoped(source)])
         guard let transfer = scan.transfers.first else { throw RecoveryError.sourceUnavailable }
         let resumePlan = try await recovery.resumePlan(for: transfer)
         let manifestURL = try await recovery.resumeManifestURL(for: transfer)
-        return try await TransferCoordinator().resume(plan: resumePlan, manifestURL: manifestURL)
+        return try await TransferCoordinator(fileSystem: fileSystem)
+            .resume(plan: resumePlan, manifestURL: manifestURL)
     }
 }
 

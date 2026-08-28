@@ -35,6 +35,8 @@ struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button("Choose Source", systemImage: "sdcard") { model.chooseSource() }
                     .keyboardShortcut("o", modifiers: .command)
+                    .disabled(model.inputLockReason != nil)
+                    .help(model.inputLockReason ?? "Choose the card or folder to copy from (Command-O).")
             }
             ToolbarSpacer(.fixed)
             ToolbarItem(placement: .primaryAction) {
@@ -68,10 +70,21 @@ struct TransferView: View {
                     if outcome.requiresConflictResolution { ConflictsView(conflicts: outcome.conflicts) }
                     OutcomeView(outcome: outcome)
                 }
+                // What the running coordinator is copying was fixed when it
+                // started. Leaving these editable would let the screen describe a
+                // source, name or destination that is not the one on disk.
                 HStack(alignment: .top, spacing: 18) {
                     SourceCard(model: model)
                     ConfigurationCard(model: model)
                     DestinationsCard(model: model)
+                }
+                .disabled(model.inputLockReason != nil)
+                if let reason = model.inputLockReason {
+                    // A greyed-out card explains nothing on its own, and the
+                    // tooltip a disabled control cannot show is unreachable by
+                    // keyboard, so the reason is written out.
+                    Label(reason, systemImage: "lock")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let result = model.scanResult { ScanSummary(result: result, mode: model.mode) }
                 if let preflight = model.preflight { PreflightSummary(result: preflight) }
@@ -250,13 +263,13 @@ private struct DestinationsCard: View {
     var body: some View {
         GroupBox("Destinations") {
             VStack(alignment: .leading, spacing: 10) {
-                Label(model.destinationURL?.lastPathComponent ?? "Choose primary", systemImage: "externaldrive")
-                    .accessibilityLabel("Primary destination: \(model.destinationURL?.lastPathComponent ?? "none chosen")")
+                destinationLabel(model.destinationURL, placeholder: "Choose primary", symbol: "externaldrive")
+                    .accessibilityLabel("Primary destination: \(model.destinationURL.map { model.pathLabel(for: $0) } ?? "none chosen")")
                 Button("Choose Primary…") { model.choosePrimary() }
                     .keyboardShortcut("d", modifiers: .command)
                 Divider()
-                Label(model.backupURL?.lastPathComponent ?? "No backup selected", systemImage: "externaldrive.badge.plus")
-                    .accessibilityLabel("Backup destination: \(model.backupURL?.lastPathComponent ?? "none chosen")")
+                destinationLabel(model.backupURL, placeholder: "No backup selected", symbol: "externaldrive.badge.plus")
+                    .accessibilityLabel("Backup destination: \(model.backupURL.map { model.pathLabel(for: $0) } ?? "none chosen")")
                 HStack {
                     Button("Choose Backup…") { model.chooseBackup() }
                         .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -269,6 +282,15 @@ private struct DestinationsCard: View {
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity)
     }
+
+    /// A full path is allowed to wrap rather than truncate: a path the user
+    /// cannot read to the end names the folder no better than the short name it
+    /// was turned on to replace.
+    private func destinationLabel(_ url: URL?, placeholder: String, symbol: String) -> some View {
+        Label(url.map { model.pathLabel(for: $0) } ?? placeholder, systemImage: symbol)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+    }
 }
 
 private struct ScanSummary: View {
@@ -278,7 +300,18 @@ private struct ScanSummary: View {
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 7) {
                 GridRow { Text("Files"); Text(result.files.count, format: .number) }
                 GridRow { Text("Size"); Text(result.totalBytes, format: .byteCount(style: .file)) }
-                GridRow { Text("RAW/JPEG pairs"); Text(result.rawJPEGPairCount, format: .number) }
+                // What is on the card decides what is listed. A video card names
+                // videos; a JPEG-only card never mentions RAW.
+                ForEach(result.composition.groups) { group in
+                    GridRow {
+                        Text(group.category.title)
+                        Text("\(group.fileCount.formatted(.number)) · \(group.byteCount.formatted(.byteCount(style: .file)))")
+                            .accessibilityLabel("\(group.fileCount) \(group.category.title), \(group.byteCount.formatted(.byteCount(style: .file)))")
+                    }
+                }
+                if result.rawJPEGPairCount > 0 {
+                    GridRow { Text("RAW + JPEG pairs"); Text(result.rawJPEGPairCount, format: .number) }
+                }
                 GridRow { Text("Excluded"); Text(result.excludedFiles.count, format: .number) }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }

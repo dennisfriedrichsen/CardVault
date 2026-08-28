@@ -3,19 +3,46 @@ import Foundation
 public enum TransferMode: String, Codable, CaseIterable, Sendable {
     case preserveCard
     case mediaOnly
-    case customDestination
 
     public var title: String {
         switch self {
         case .preserveCard: "Preserve Card"
         case .mediaOnly: "Media Only"
-        case .customDestination: "Custom Destination"
+        }
+    }
+}
+
+/// What a file is *for*, which is what a summary should report. A card may hold
+/// only video, only JPEG, or a mix; nothing here assumes a stills workflow.
+public enum MediaCategory: String, Codable, Sendable, CaseIterable {
+    case photo, video, audio, sidecar, other
+
+    public var title: String {
+        switch self {
+        case .photo: "Photos"
+        case .video: "Videos"
+        case .audio: "Audio"
+        case .sidecar: "Sidecars"
+        case .other: "Other files"
         }
     }
 }
 
 public enum MediaKind: String, Codable, Sendable {
-    case raw, jpeg, heif, tiff, png, video, sidecar, other
+    case raw, jpeg, heif, tiff, png, video, audio, sidecar, other
+
+    public var category: MediaCategory {
+        switch self {
+        case .raw, .jpeg, .heif, .tiff, .png: .photo
+        case .video: .video
+        case .audio: .audio
+        case .sidecar: .sidecar
+        case .other: .other
+        }
+    }
+
+    /// Sidecars count as media: a proxy or per-clip metadata file left behind is
+    /// a loss the camera cannot regenerate.
     public var isRecognizedMedia: Bool { self != .other }
 }
 
@@ -179,14 +206,21 @@ public struct DestinationFileResult: Codable, Hashable, Sendable {
     /// How an existing file at this destination path was classified, when one
     /// was found. Recorded durably so a skip or a pause stays auditable.
     public var conflict: ConflictClassification?
+    /// What became of the source's dates on this copy. Absent in manifests
+    /// written before timestamps were carried over, so `schemaVersion` stays 1.
+    /// Kept separate from `verification` because a date is not content: this
+    /// never changes whether the copy is verified.
+    public var timestamps: TimestampOutcome?
 
     public init(copyState: CopyState = .pending, verification: VerificationResult = .pending,
                 destinationChecksum: String? = nil, error: String? = nil,
-                conflict: ConflictClassification? = nil) {
+                conflict: ConflictClassification? = nil,
+                timestamps: TimestampOutcome? = nil) {
         self.copyState = copyState
         self.verification = verification
         self.destinationChecksum = destinationChecksum
         self.error = error
         self.conflict = conflict
+        self.timestamps = timestamps
     }
 }
