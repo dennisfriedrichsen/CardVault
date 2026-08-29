@@ -728,8 +728,10 @@ final class AppModel {
         .urls(for: .picturesDirectory, in: .userDomainMask).first
         ?? URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
 
+    /// Fixed `yyyy-MM-dd`, independent of locale, so names sort chronologically
+    /// and don't depend on the user's month/day ordering preference.
     static func defaultTransferName() -> String {
-        Date.now.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))
+        Date.now.formatted(.iso8601.year().month().day())
     }
 }
 
