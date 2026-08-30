@@ -58,10 +58,12 @@ safe to erase.
   limits. Preflight blocks case-folding collisions and reports capacity/local-volume limitations.
 - Destination identity uses public volume UUID/resource metadata when available, not display names or
   mount paths alone. Two folders on one physical-volume identity produce a non-independence warning.
-- The primary destination must be local. An optional network/NFS backup is supported and must remain
-  mounted through copy and verification. Capacity detection falls back to filesystem statistics when
-  a network volume does not report macOS's preferred capacity value. Finalization never assumes
-  cross-volume moves.
+- A mounted NFS or SMB share can be any destination, primary included, and must stay mounted through
+  copy and verification. A share reports no volume UUID and no device, so its identity is the server
+  and export the mount names: two shares on one server are called out as not independent, and a
+  transfer whose every copy is on a share says so. Capacity detection falls back to filesystem
+  statistics when a network volume does not report macOS's preferred capacity value. Finalization
+  never assumes cross-volume moves. See [Docs/network-destinations.md](Docs/network-destinations.md).
 
 ## Build and test
 

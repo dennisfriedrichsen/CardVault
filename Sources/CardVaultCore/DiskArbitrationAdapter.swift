@@ -6,6 +6,10 @@ import Foundation
 public struct DiskArbitrationTopologyProvider: VolumeTopologyProvider {
     public init() {}
 
+    /// A network mount never gets past the BSD-name guard: Disk Arbitration describes one, but
+    /// `DADiskGetBSDName` returns nothing because there is no device to name. That is why the
+    /// node this returns carries no network flag — nothing about a share could ever reach it.
+    /// `MountFacts` answers for a network mount instead, and for every other mount too.
     public func topology(forVolumeAt url: URL) throws -> VolumeTopologyNode {
         guard let session = DASessionCreate(kCFAllocatorDefault) else { throw VolumeTopologyError.sessionUnavailable }
         guard let disk = DADiskCreateFromVolumePath(kCFAllocatorDefault, session, url.standardizedFileURL as CFURL),
@@ -32,7 +36,6 @@ public struct DiskArbitrationTopologyProvider: VolumeTopologyProvider {
             mountPath: (description[kDADiskDescriptionVolumePathKey as String] as? URL)?.path,
             isRemovable: description[kDADiskDescriptionMediaRemovableKey as String] as? Bool ?? false,
             isEjectable: description[kDADiskDescriptionMediaEjectableKey as String] as? Bool ?? false,
-            isNetwork: description[kDADiskDescriptionVolumeNetworkKey as String] as? Bool ?? false,
             deviceModel: description[kDADiskDescriptionDeviceModelKey as String] as? String
         )
     }

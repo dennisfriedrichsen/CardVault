@@ -72,10 +72,14 @@ never guessed at.
 
 The manifest deliberately records no mount paths and no bookmark bytes, so recovery resolves the
 source and each destination from security-scoped bookmarks stored per transfer, then confirms each
-one against the recorded `VolumeIdentity`. Matching is by volume UUID or partition identifier only: a
-card reinserted at a different mount point still matches, and a reformatted card reusing its old
-label does not. A stale bookmark is renewed rather than discarded, because a drive that moved is not
-a drive that was lost.
+one against the recorded `VolumeIdentity`. Matching is by volume UUID, partition identifier, or — for
+a share, which reports neither — the server and export the mount names: a card reinserted at a
+different mount point still matches, a reformatted card reusing its old label does not, and a
+different export on the server a transfer used is a mismatch rather than a shrug. A stale bookmark is
+renewed rather than discarded, because a drive that moved is not a drive that was lost.
+
+`networkOrigin` is additive and optional, so `schemaVersion` remains 1: a manifest written before it
+existed decodes with the field absent, which is also what a local volume records.
 
 `abandonedAt` is set when the user explicitly abandons a transfer. The manifest and every file it
 describes stay on disk; the marker only stops recovery from offering the transfer again. It is
