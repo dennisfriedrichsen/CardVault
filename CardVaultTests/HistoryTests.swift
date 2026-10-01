@@ -370,6 +370,14 @@ struct HistoryTests {
         }
     }
 
+    @Test("Handoff names the bundle identifier SDelight actually ships under")
+    func handoffTargetsTheShippedIdentifier() {
+        // Pinned to the literal rather than derived from the target: every other
+        // handoff test stubs the locator with whatever this list already holds,
+        // so a wrong identifier here is invisible until it fails on a real Mac.
+        #expect(HandoffTarget.sdelight.bundleIdentifiers == ["com.friedrichsenweb.SDelight"])
+    }
+
     @Test("Handoff is explained rather than silently unavailable")
     func handoffExplainsWhyItIsUnavailable() async throws {
         try await withFixture { fixture in

@@ -9,7 +9,9 @@ public struct HandoffTarget: Sendable, Hashable {
     public let displayName: String
     /// Candidate bundle identifiers, tried in order. A list rather than one
     /// value so a rename or a differently-signed build does not silently turn
-    /// the action off.
+    /// the action off. Every entry must be an identifier the companion app has
+    /// actually shipped under: a speculative one cannot make handoff work, and
+    /// it makes a broken list look populated.
     public let bundleIdentifiers: [String]
 
     public init(displayName: String, bundleIdentifiers: [String]) {
@@ -19,7 +21,7 @@ public struct HandoffTarget: Sendable, Hashable {
 
     public static let sdelight = HandoffTarget(
         displayName: "SDelight",
-        bundleIdentifiers: ["com.dennisfriedrichsen.SDelight", "com.sdelight.SDelight"])
+        bundleIdentifiers: ["com.friedrichsenweb.SDelight"])
 }
 
 /// Service boundary over the installed-application lookup, so handoff rules are
