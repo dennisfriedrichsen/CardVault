@@ -263,7 +263,7 @@ final class AppModel {
                     // resuming reads from it again.
                     setStatus(.conflictPaused)
                 } else {
-                    setStatus(Self.completionStatus(for: outcome))
+                    setStatus(Self.completionStatus(for: outcome, destinations: plan.destinations))
                     await recordHistory(from: outcome)
                 }
             } catch is CancellationError {
@@ -345,11 +345,25 @@ final class AppModel {
     func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
 
     func revealManifest(for entry: TransferHistoryEntry) {
-        guard let path = entry.manifestPaths.first(where: FileManager.default.fileExists(atPath:)) else {
-            errorMessage = "The transfer manifest is unavailable. Reconnect one of the transfer destinations and try again."
-            return
+        revealFirstReachable(entry.manifestPaths.map { URL(filePath: $0) })
+    }
+
+    /// Asking whether a file exists is not free when the folder is a share: a mount whose
+    /// server has stopped answering blocks the caller in the kernel until it comes back, and on
+    /// the main actor that is a beachball with no way out. The question is worth asking anyway —
+    /// it is what keeps the button from revealing a path on a drive that is not there — so it is
+    /// asked off the main actor, where waiting costs nothing but the answer.
+    private func revealFirstReachable(_ candidates: [URL]) {
+        Task {
+            let reachable = await Task.detached(priority: .userInitiated) {
+                candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+            }.value
+            guard let reachable else {
+                errorMessage = "The transfer manifest is unavailable. Reconnect one of the transfer destinations and try again."
+                return
+            }
+            reveal(reachable)
         }
-        reveal(URL(filePath: path))
     }
 
     /// A stopped transfer has no outcome to report, but the card is in exactly
@@ -538,7 +552,7 @@ final class AppModel {
                 if outcome?.requiresConflictResolution == true {
                     setStatus(.conflictPaused)
                 } else {
-                    setStatus(Self.completionStatus(for: outcome))
+                    setStatus(Self.completionStatus(for: outcome, destinations: plan.destinations))
                     await recordHistory(from: outcome)
                     await forgetRoots(transferID: transfer.id)
                 }
@@ -559,12 +573,11 @@ final class AppModel {
     }
 
     func revealManifest(for transfer: RecoverableTransfer) {
-        guard let url = transfer.destinations.compactMap(\.manifestURL)
-            .first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-            errorMessage = "The transfer manifest is unavailable. Reconnect one of the transfer destinations and try again."
-            return
-        }
-        reveal(url)
+        revealFirstReachable(transfer.destinations.compactMap(\.manifestURL))
+    }
+
+    func revealManifest(for inspection: RecoveryInspection) {
+        revealFirstReachable(inspection.manifestURLs)
     }
 
     /// Asks before removing anything, and shows exactly what would go.
@@ -662,9 +675,13 @@ final class AppModel {
 
     /// A verified primary never stands in for a finished transfer: a run that
     /// left any destination unverified is named for what is still missing.
-    private static func completionStatus(for outcome: TransferOutcome?) -> PrincipalUIState {
+    private static func completionStatus(for outcome: TransferOutcome?,
+                                         destinations: [DestinationPlan]) -> PrincipalUIState {
         guard let outcome else { return .needsAttention }
-        if outcome.state == .verified { return .verified }
+        if outcome.state == .verified {
+            // Verified either way; the state differs only in saying where the copies went.
+            return outcome.isOnNetworkStorageOnly(given: destinations) ? .verifiedNetworkOnly : .verified
+        }
         let verified = outcome.destinations.filter(\.isVerified).count
         if verified == 0 { return outcome.state == .failed ? .failed : .needsAttention }
         return verified < outcome.destinations.count ? .primaryVerifiedBackupIncomplete : .needsAttention

@@ -100,13 +100,18 @@ public struct VolumeIdentity: Codable, Hashable, Sendable {
     /// Partition backing the volume, e.g. `disk4s1`.
     public var partitionIdentifier: String?
     public var identitySource: VolumeIdentitySource?
+    /// The server and export a network mount names. Nil for a local volume, and for a network
+    /// mount whose source string was not recognised. Kept apart from `physicalStoreIdentifier`
+    /// on purpose: it identifies a machine, never a disk.
+    public var networkOrigin: NetworkVolumeOrigin?
 
     public init(volumeUUID: UUID? = nil, resourceIdentifier: String? = nil,
                 displayName: String, fileSystem: String = "Unknown",
                 isRemovable: Bool = false, isLocal: Bool = true,
                 physicalStoreIdentifier: String? = nil,
                 partitionIdentifier: String? = nil,
-                identitySource: VolumeIdentitySource? = nil) {
+                identitySource: VolumeIdentitySource? = nil,
+                networkOrigin: NetworkVolumeOrigin? = nil) {
         self.volumeUUID = volumeUUID
         self.resourceIdentifier = resourceIdentifier
         self.displayName = displayName
@@ -116,6 +121,7 @@ public struct VolumeIdentity: Codable, Hashable, Sendable {
         self.physicalStoreIdentifier = physicalStoreIdentifier
         self.partitionIdentifier = partitionIdentifier
         self.identitySource = identitySource
+        self.networkOrigin = networkOrigin
     }
 }
 

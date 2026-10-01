@@ -309,7 +309,9 @@ public actor TransferHistoryInspector {
         let current = resolver.identity(for: url, defaultName: url.lastPathComponent)
         switch recorded.relation(to: current) {
         case .sameVolume: return .available
-        case .sameDevice, .distinct: return .mismatched
+        // A different export on the server this transfer used is a different tree,
+        // so what stands there now is not the copy history recorded.
+        case .sameDevice, .sameServer, .distinct: return .mismatched
         case .indeterminate: return .indeterminate
         }
     }

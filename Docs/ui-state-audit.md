@@ -47,6 +47,7 @@ Each state links its light capture; the dark capture is the same name with
 | `verifying` | [png](ui-states/verifying-light.png) | `checkmark.shield` | in progress | Verifying copied files. Do not remove the card yet. |
 | `finalizing` | [png](ui-states/finalizing-light.png) | `hourglass` | in progress | Finalizing the verified transfer. |
 | `verified` | [png](ui-states/verified-light.png) | `checkmark.seal.fill` | success | Transfer fully verified. Safe to eject… |
+| `verifiedNetworkOnly` | not yet captured | `externaldrive.badge.checkmark` | success | Transfer fully verified on network storage… not on a disk attached to this Mac… |
 | `primaryVerifiedBackupIncomplete` | [png](ui-states/primaryVerifiedBackupIncomplete-light.png) | `externaldrive.badge.exclamationmark` | attention | Primary verified. Backup incomplete… |
 | `conflictPaused` | [png](ui-states/conflictPaused-light.png) | `hand.raised.fill` | attention | Paused. *n* files need a decision… |
 | `interrupted` | [png](ui-states/interrupted-light.png) | `bolt.horizontal.circle.fill` | attention | Transfer interrupted… can be resumed. |
@@ -55,6 +56,12 @@ Each state links its light capture; the dark capture is the same name with
 | `failed` | [png](ui-states/failed-light.png) | `xmark.octagon.fill` | blocked | Transfer failed. No destination was verified… |
 | `safeToEject` | [png](ui-states/safeToEject-light.png) | `eject.fill` | success | Safe to eject. Safe to eject does not mean safe to erase. |
 | `ejected` | [png](ui-states/ejected-light.png) | `eject.circle.fill` | success | Card ejected. Ready for the next transfer… |
+
+> `verifiedNetworkOnly` arrived with network destinations and has no reference capture yet. Its
+> fixture exists and its wording is asserted, so nothing about it is unspecified; what is missing
+> is the evidence for a layout conclusion, and that is due with the next capture rather than
+> ahead of it. Its longest line — the title plus the two-sentence detail — is the one to look at,
+> since it is the widest text any success state carries.
 
 `interrupted` is captured as the relaunch recovery sheet over the window, because
 that sheet *is* the state a user meets it in. `cancelled` is captured behind that

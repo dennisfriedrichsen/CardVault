@@ -71,7 +71,10 @@ Load-bearing pieces and why they exist:
 - **`VolumeServices.swift` / `VolumeTopology.swift` / `DiskArbitrationAdapter.swift`** — volume identity
   comes from Disk Arbitration behind a mockable provider, falling back to public URL volume metadata.
   An identity resolved via the fallback cannot claim two paths share a physical device. Never identify a
-  destination by display name or mount path alone.
+  destination by display name or mount path alone. A network mount has no BSD device, so Disk
+  Arbitration never describes one at all; its server and export come from `statfs` via `MountFacts`
+  into `NetworkVolumeOrigin`, which identifies a machine and never a disk. See
+  `Docs/network-destinations.md`.
 - **`Conflicts.swift`** — classifies existing destination content. Existing final or unrelated files are
   never overwritten; a conflict pauses the transfer before verification and waits for a decision.
 - **`Timestamps.swift`** — carrying the source's dates onto destination copies. Dates are metadata,
@@ -109,7 +112,9 @@ recovery can reach a months-old transfer's roots after the last-used selections 
 
 `Docs/` carries the contracts worth reading before changing the matching area:
 `manifest-schema-v1.md`, `transfer-history.md`, `fault-injection-coverage.md`,
-`progress-performance.md`, and `manual-removable-media-test.md` (the opt-in real-card procedure).
+`progress-performance.md`, `network-destinations.md` (what CardVault can and cannot tell about an
+NFS or SMB share, and why same-server warns instead of blocking), and
+`manual-removable-media-test.md` (the opt-in real-card procedure).
 
 `ui-state-audit.md` is the accessibility and layout audit of the principal UI states, with
 `Docs/ui-states/` as its reference screenshots and `ui-state-capture.md` as the one command that
