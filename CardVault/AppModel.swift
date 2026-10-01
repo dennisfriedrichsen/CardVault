@@ -254,8 +254,8 @@ final class AppModel {
                     + "be resumed automatically. Choosing the folders again before starting records them."
             }
             do {
-                outcome = try await coordinator.execute(plan: plan) { [weak self] update in
-                    await self?.receive(update)
+                outcome = try await coordinator.execute(plan: plan) { update in
+                    await self.receive(update)
                 }
                 isFinalizing = false
                 if outcome?.requiresConflictResolution == true {
@@ -472,10 +472,10 @@ final class AppModel {
         }
         let name = handoff.target.displayName
         NSWorkspace.shared.open([root], withApplicationAt: applicationURL,
-                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                                configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
             guard let error else { return }
             let reason = error.localizedDescription
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 self?.errorMessage = "\(name) could not open \(status.label): \(reason)"
             }
         }
@@ -545,8 +545,8 @@ final class AppModel {
                 let manifestURL = try await recoveryCoordinator.resumeManifestURL(for: transfer)
                 // Resumes at a whole-file boundary from the durable manifest;
                 // files already verified are confirmed, not copied again.
-                outcome = try await coordinator.resume(plan: plan, manifestURL: manifestURL) { [weak self] update in
-                    await self?.receive(update)
+                outcome = try await coordinator.resume(plan: plan, manifestURL: manifestURL) { update in
+                    await self.receive(update)
                 }
                 isFinalizing = false
                 if outcome?.requiresConflictResolution == true {
