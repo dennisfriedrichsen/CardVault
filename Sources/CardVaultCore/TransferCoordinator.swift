@@ -266,8 +266,7 @@ public actor TransferCoordinator {
             guard sourceSize == file.byteCount else { throw FileSystemError.sourceChanged(file.relativeSourcePath) }
             manifest.files[index].sourceChecksum = try await fileSystem.checksum(source, expectedSize: file.byteCount,
                                                                                 onBytes: onBytes)
-            // Destinations are written one at a time: concurrent writes would mean
-            // concurrent reads of the same removable source.
+            var pending: [(location: Location, url: URL)] = []
             for location in locations {
                 let result = manifest.files[index].destinations[location.destination.id]
                 guard result?.copyState != .copied && result?.verification != .verified else {
@@ -343,17 +342,25 @@ public actor TransferCoordinator {
                     }
                 }
                 manifest.files[index].destinations[location.destination.id]?.copyState = .copying
+                pending.append((location, destination))
+            }
+            if !pending.isEmpty {
+                // Every copy about to start is recorded as in progress before its
+                // first byte lands, so recovery may remove any of them — and one
+                // record per file, not per destination, is what keeps a network
+                // destination from spending more time on manifests than photos.
                 try await persist(manifest, locations: locations)
-                do {
-                    try await fileSystem.copyExclusive(from: source, to: destination,
-                                                       expectedSize: file.byteCount, onBytes: onBytes)
-                    manifest.files[index].destinations[location.destination.id]?.copyState = .copied
-                    await applyTimestamps(&manifest, fileIndex: index, location: location)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    manifest.files[index].destinations[location.destination.id]?.copyState = .failed
-                    manifest.files[index].destinations[location.destination.id]?.error = String(describing: error)
+                let failures = try await fileSystem.copyExclusive(
+                    from: source, to: pending.map(\.url), expectedSize: file.byteCount,
+                    expectedChecksum: manifest.files[index].sourceChecksum, onBytes: onBytes)
+                for ((location, _), failure) in zip(pending, failures) {
+                    if let failure {
+                        manifest.files[index].destinations[location.destination.id]?.copyState = .failed
+                        manifest.files[index].destinations[location.destination.id]?.error = failure
+                    } else {
+                        manifest.files[index].destinations[location.destination.id]?.copyState = .copied
+                        await applyTimestamps(&manifest, fileIndex: index, location: location)
+                    }
                 }
                 try await persist(manifest, locations: locations)
             }
@@ -485,8 +492,10 @@ public actor TransferCoordinator {
                     manifest.files[index].destinations[record.destinationID]?.verification = .failed
                     manifest.files[index].destinations[record.destinationID]?.error = record.error
                 }
-                try await persist(manifest, locations: locations)
             }
+            // One record per file: a result lost to an interruption here is only
+            // a copy read back again on resume, never a claim made without a read.
+            if !records.isEmpty { try await persist(manifest, locations: locations) }
             await completeFile()
         }
         await flushPhase(currentRelativePath: .some(nil))

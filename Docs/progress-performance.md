@@ -92,19 +92,66 @@ These require the physical devices and are not yet recorded:
   and after this change.
 - Sequential versus `destinationConcurrency: 2` on a representative SD card
   reader plus two *separate* external drives.
+- Copy throughput from a card reader to a local primary plus an NFS or SMB
+  backup, before and after the single-read copy described above.
 - Rate and estimate stability on a UHS-I card, where per-file overhead is a much
   larger share of elapsed time than on the SSD above.
 
 Record results in this table when the runs happen; change
 `TransferTuning.default` only alongside a row here that justifies it.
 
+## Work per file in the copy phase
+
+Each file used to be read from the card once to hash it and then once more for
+every destination, and the manifest was saved to every destination before and
+after each destination's copy. With a network backup, that made the server's
+round trips, not the card, set the pace: one real transfer to an NFS share over
+Wi-Fi spent as many RPCs on manifest creates, renames, locks and commits as on
+photo data, and the card sat mostly idle.
+
+The copy now reads each file once and writes every chunk to all destinations
+before reading the next chunk. Like the hashing pass, that read computes a
+digest, and a file whose second read disagrees with the first is failed at
+every destination as `sourceChanged` instead of being caught later as a
+verification mismatch. The hashing pass
+itself stays separate, so the recorded source digest still comes from a read
+independent of the one that produced the copies.
+
+Each destination's failure is still its own: a destination that stops is closed,
+its partial file removed, and its error recorded, while the others finish the
+same file from the same read. Every copy is still flushed, sized, and read back
+for verification.
+
+Per file, with two destinations:
+
+| | Before | After |
+| --- | --- | --- |
+| Reads of the source | 3 | 2 |
+| Manifest saves, copy phase | 8 | 4 |
+| Manifest saves, verification | 4 | 2 |
+| Temporary files per manifest save | 2 | 1 |
+
+Before any byte of a file is written, every copy about to start is recorded as
+`copying` in one save, so recovery's rule — only a file the manifest records as
+in progress may be removed and retried — holds for every destination at once. A
+verification result lost between two saves is only a copy read back again on
+resume. `FaultInjectionTests` pins both counts (`sourceReadsPerFile`,
+`manifestSavesPerFile`).
+
+`ProgressBenchmark` before and after, three runs each on this machine's SSD:
+snapshot rates are unchanged (5–11 per second), and elapsed times overlap
+within run-to-run noise (dual-destination: 1.5–3.9 s before, 1.9–3.1 s after).
+Both destinations of the benchmark sit on the same fast flash, which is the case
+this change helps least; a measurement on a real card reader with a network
+backup belongs under "Still to measure on hardware".
+
 ## What did not change
 
 Copy at 100 percent is a phase boundary, never a result. `TransferProgress`
 exposes `isPhaseComplete` for the phase only, the copy card says "Copy complete —
 verification still in progress", and the only success indicator in the UI reads
-from `TransferOutcome`. Checksums, flush and close ordering, manifest writes, the
+from `TransferOutcome`. Checksums, flush and close ordering, the
 existing-conflict rules, and whole-file resume are untouched: verification still
 computes one SHA-256 per destination copy and compares it to the source digest,
-and manifest updates are still applied and persisted serially in destination
-order even when the hashing that produced them ran concurrently.
+and manifest updates are still applied in destination order even when the
+hashing that produced them ran concurrently; they are persisted once per file.

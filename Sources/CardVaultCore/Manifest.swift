@@ -97,7 +97,11 @@ public actor ManifestStore {
         let data = try encoder.encode(manifest)
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).new-\(UUID().uuidString)")
         let backup = url.appendingPathExtension("previous")
-        try data.write(to: temporary, options: [.atomic])
+        // Not `.atomic`: that writes a second temporary file and renames it onto
+        // this one, which is already unique and only ever made visible by the
+        // replace below. On a network mount every extra create and rename is a
+        // round trip to the server, paid on every manifest update.
+        try data.write(to: temporary)
         if fileManager.fileExists(atPath: url.path) {
             if fileManager.fileExists(atPath: backup.path) { try? fileManager.removeItem(at: backup) }
             try fileManager.copyItem(at: url, to: backup)

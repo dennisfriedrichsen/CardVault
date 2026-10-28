@@ -215,59 +215,158 @@ public actor LocalFileSystem {
         if let expectedSize, bytesRead != expectedSize {
             throw FileSystemError.sourceChanged(url.lastPathComponent)
         }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        return Self.hex(hash.finalize())
     }
 
-    public func copyExclusive(from source: URL, to destination: URL, expectedSize: Int64,
-                              onBytes: ByteHandler? = nil) async throws {
-        let readFault = try await injector?.check(.read, url: source) ?? nil
-        let writeFault = try await injector?.check(.write, url: destination) ?? nil
-        guard !fileManager.fileExists(atPath: destination.path) else {
-            throw FileSystemError.existingConflict(destination.path)
+    private static func hex(_ digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// One destination of a fanned-out copy, open for writing. The file was
+    /// created by this copy, which is what makes removing it on failure safe.
+    private struct OpenCopy {
+        let slot: Int
+        let url: URL
+        let handle: FileHandle
+        let fault: InjectedFault?
+        var written: Int64 = 0
+    }
+
+    /// Copies one source file to every destination from a single read of it.
+    /// The card is read once per file however many copies it feeds, so a
+    /// second destination costs its own write time and not another pass over
+    /// removable media — on a network mount, the slow half of the work.
+    ///
+    /// Returns one entry per destination, in order: nil for a copy that was
+    /// written, flushed and sized, otherwise why it was not. A destination's
+    /// failure is its own — its partial file is removed and the others carry
+    /// on — so a verified primary never depends on a backup, or the reverse.
+    /// A source that cannot be read, or that reads back differently from the
+    /// hashing pass that produced `expectedChecksum`, fails every destination:
+    /// none of them then holds what the card holds. Only cancellation throws.
+    public func copyExclusive(from source: URL, to destinations: [URL], expectedSize: Int64,
+                              expectedChecksum: String? = nil,
+                              onBytes: ByteHandler? = nil) async throws -> [String?] {
+        var failures = [String?](repeating: nil, count: destinations.count)
+        let readFault: InjectedFault?
+        do { readFault = try await injector?.check(.read, url: source) ?? nil } catch {
+            return failures.map { _ in Self.describe(error, copying: source, expectedSize: expectedSize) }
         }
-        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard fileManager.createFile(atPath: destination.path, contents: nil) else {
-            throw CocoaError(.fileWriteUnknown)
+        var outputs: [OpenCopy] = []
+        for (slot, destination) in destinations.enumerated() {
+            var created = false
+            do {
+                let fault = try await injector?.check(.write, url: destination) ?? nil
+                guard !fileManager.fileExists(atPath: destination.path) else {
+                    throw FileSystemError.existingConflict(destination.path)
+                }
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+                guard fileManager.createFile(atPath: destination.path, contents: nil) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                created = true
+                outputs.append(OpenCopy(slot: slot, url: destination,
+                                        handle: try FileHandle(forWritingTo: destination), fault: fault))
+            } catch {
+                // Content this copy did not create is never removed.
+                if created { try? fileManager.removeItem(at: destination) }
+                failures[slot] = Self.describe(error, copying: source, expectedSize: expectedSize)
+            }
         }
+
+        func discard(_ output: OpenCopy, because error: Error) {
+            try? output.handle.close()
+            try? fileManager.removeItem(at: output.url)
+            failures[output.slot] = Self.describe(error, copying: source, expectedSize: expectedSize)
+        }
+
+        guard !outputs.isEmpty else { return failures }
+        var hash = SHA256()
+        var bytesRead: Int64 = 0
+        var sourceFailure: Error?
         do {
             let input = try FileHandle(forReadingFrom: source)
-            let output = try FileHandle(forWritingTo: destination)
-            defer { try? input.close(); try? output.close() }
-            var copied: Int64 = 0
-            var shortWrite = false
-            var shortRead = false
-            while true {
+            defer { try? input.close() }
+            while !outputs.isEmpty {
                 try Task.checkCancellation()
                 var limit = chunkBytes
-                if let writeFault {
-                    let remaining = writeFault.byteLimit - copied
-                    guard remaining > 0 else { shortWrite = true; break }
-                    limit = min(limit, Int(remaining))
-                }
                 if let readFault {
-                    let remaining = readFault.byteLimit - copied
-                    guard remaining > 0 else { shortRead = true; break }
+                    let remaining = readFault.byteLimit - bytesRead
+                    guard remaining > 0 else {
+                        sourceFailure = readFault.kind?.error(operation: .read, url: source)
+                            ?? FileSystemError.shortRead(source.lastPathComponent, bytesRead: bytesRead)
+                        break
+                    }
                     limit = min(limit, Int(remaining))
                 }
                 guard let data = try input.read(upToCount: limit), !data.isEmpty else { break }
-                try output.write(contentsOf: data)
-                copied += Int64(data.count)
-                await onBytes?(Int64(data.count))
+                bytesRead += Int64(data.count)
+                hash.update(data: data)
+                var index = outputs.startIndex
+                while index < outputs.endIndex {
+                    do {
+                        try Self.write(data, to: &outputs[index])
+                        await onBytes?(Int64(data.count))
+                        index += 1
+                    } catch {
+                        discard(outputs.remove(at: index), because: error)
+                    }
+                }
             }
-            try output.synchronize()
-            if shortWrite {
-                throw writeFault?.kind?.error(operation: .write, url: destination)
-                    ?? FileSystemError.shortWrite(destination.lastPathComponent, bytesWritten: copied)
-            }
-            if shortRead {
-                throw readFault?.kind?.error(operation: .read, url: source)
-                    ?? FileSystemError.shortRead(source.lastPathComponent, bytesRead: copied)
-            }
-            guard copied == expectedSize else { throw FileSystemError.sourceChanged(source.lastPathComponent) }
+        } catch is CancellationError {
+            for output in outputs { discard(output, because: CancellationError()) }
+            throw CancellationError()
         } catch {
-            try? fileManager.removeItem(at: destination)
-            throw Self.named(error, copying: source, expectedSize: expectedSize)
+            sourceFailure = error
         }
+
+        if sourceFailure == nil, !outputs.isEmpty {
+            if bytesRead != expectedSize {
+                sourceFailure = FileSystemError.sourceChanged(source.lastPathComponent)
+            } else if let expectedChecksum, Self.hex(hash.finalize()) != expectedChecksum {
+                // The copy's own read disagrees with the hashing read before it:
+                // the card changed, or the reader returned different bytes the
+                // second time. Either way the source digest no longer describes
+                // what was written, and verification would compare against it.
+                sourceFailure = FileSystemError.sourceChanged(source.lastPathComponent)
+            }
+        }
+        for output in outputs {
+            if let sourceFailure { discard(output, because: sourceFailure); continue }
+            do {
+                try output.handle.synchronize()
+                try output.handle.close()
+                guard output.written == expectedSize else {
+                    throw FileSystemError.shortWrite(output.url.lastPathComponent, bytesWritten: output.written)
+                }
+            } catch {
+                discard(output, because: error)
+            }
+        }
+        return failures
+    }
+
+    /// Writes one chunk, honouring an injected byte budget the way a device
+    /// that fills up or goes away partway through does.
+    private static func write(_ data: Data, to output: inout OpenCopy) throws {
+        if let fault = output.fault {
+            let remaining = fault.byteLimit - output.written
+            if remaining < Int64(data.count) {
+                if remaining > 0 {
+                    try output.handle.write(contentsOf: data.prefix(Int(remaining)))
+                    output.written += remaining
+                }
+                throw fault.kind?.error(operation: .write, url: output.url)
+                    ?? FileSystemError.shortWrite(output.url.lastPathComponent, bytesWritten: output.written)
+            }
+        }
+        try output.handle.write(contentsOf: data)
+        output.written += Int64(data.count)
+    }
+
+    private static func describe(_ error: Error, copying source: URL, expectedSize: Int64) -> String {
+        String(describing: named(error, copying: source, expectedSize: expectedSize))
     }
 
     /// Whether this file system stores a creation date at all, measured by

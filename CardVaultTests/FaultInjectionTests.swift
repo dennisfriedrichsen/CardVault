@@ -630,9 +630,112 @@ struct FaultInjectionTests {
             try await fixture.expectSourceUnchanged(before)
         }
     }
+
+    @Test("A destination that stops mid-file leaves the other copy of that file verified", arguments: [0, 1])
+    func oneDestinationStopsMidFile(failing: Int) async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let before = try await fixture.sourceSnapshot()
+            let surviving = 1 - failing
+            // Both copies are fed from the same read of the card, so the one that
+            // stops must not take the other down with it, in either order.
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "\(fixture.destinationRoots[failing].lastPathComponent)/",
+                      after: 1, effect: .stop(afterBytes: 40_000, reporting: .deviceFull))
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .partiallySuccessful)
+            #expect(outcome.destinations[surviving].isVerified)
+            #expect(outcome.destinations[surviving].finalURL == fixture.finalRoot(index: surviving))
+            #expect(outcome.destinations[failing].failedFiles == 1)
+            #expect(outcome.destinations[failing].finalURL == nil)
+            let manifest = try await fixture.manifest(index: failing)
+            let failed = fixture.result(manifest, "second.CR3", index: failing)
+            #expect(failed.copyState == .failed)
+            #expect(failed.error?.contains("destinationFull") == true)
+            #expect(!FileManager.default.fileExists(atPath: fixture.stagedURL("second.CR3", index: failing).path))
+            #expect(fixture.result(manifest, "second.CR3", index: surviving).verification == .verified)
+            #expect(try fixture.stagedContents("second.CR3", index: surviving) == fixture.contents("second.CR3"))
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
+
+    @Test("A source that reads differently while copying fails every destination of that file")
+    func sourceDisagreesWithItsHash() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let mutating = fixture.source.appending(path: "DCIM/second.CR3")
+            // Same size, different bytes: only the digest can tell, and the copy's
+            // own read is the one place that sees it before verification would.
+            let changed = Data(repeating: 7, count: Int(fixture.fileByteCount))
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: "DCIM/second.CR3", after: 1,
+                      effect: .interpose { try? changed.write(to: mutating) })
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .failed)
+            let manifest = try await fixture.manifest()
+            for index in fixture.destinationRoots.indices {
+                let result = fixture.result(manifest, "second.CR3", index: index)
+                #expect(result.copyState == .failed)
+                #expect(result.error?.contains("sourceChanged") == true)
+                #expect(!FileManager.default.fileExists(atPath: fixture.stagedURL("second.CR3", index: index).path))
+                #expect(fixture.result(manifest, "first.CR3", index: index).verification == .verified)
+            }
+            #expect(try Data(contentsOf: mutating) == changed)
+        }
+    }
+
+    // MARK: - Work per file
+
+    @Test("The card is read twice per file however many destinations it feeds")
+    func sourceReadsPerFile() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let reads = Tally()
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: "/CARD/", effect: .interpose { await reads.add() }, repeats: true)
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            // One read to hash, one read that feeds every copy.
+            #expect(await reads.count == 2 * fixture.fileNames.count)
+        }
+    }
+
+    @Test("Manifest updates are per file, not per file and destination")
+    func manifestSavesPerFile() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let copying = Tally()
+            let verifying = Tally()
+            let store = ManifestStore { manifest, _ in
+                if manifest.state == .copying { await copying.add() }
+                if manifest.state == .verifying { await verifying.add() }
+                return nil
+            }
+
+            let outcome = try await fixture.coordinator(manifestStore: store).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            let files = fixture.fileNames.count
+            let locations = fixture.destinationRoots.count
+            // Copying: the phase start, then in progress and done for each file.
+            #expect(await copying.count == (1 + 2 * files) * locations)
+            // Verifying: the phase start, then one record per file.
+            #expect(await verifying.count == (1 + files) * locations)
+        }
+    }
 }
 
 // MARK: - Test doubles
+
+private actor Tally {
+    private(set) var count = 0
+    func add() { count += 1 }
+}
 
 /// A clock the test moves by hand, so a ten-minute sleep costs no wall time and
 /// happens at exactly the same point on every run.
