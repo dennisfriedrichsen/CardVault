@@ -346,12 +346,21 @@ public actor RecoveryCoordinator {
                             sourceVolume: transfer.manifest.source, files: files, destinations: destinations)
     }
 
-    /// The manifest URL to resume from: the copy that recorded the most progress.
-    public func resumeManifestURL(for transfer: RecoverableTransfer) throws -> URL {
-        guard let url = transfer.destinations.compactMap(\.manifestURL).first else {
-            throw RecoveryError.manifestUnreadable(transfer.name)
+    /// The manifest URL to resume from: the copy that recorded the most progress,
+    /// the first destination's on a tie. Destinations are not equally current —
+    /// a network destination's record is saved once per batch of files — so
+    /// resuming a network Primary from its own record would copy that batch again.
+    public func resumeManifestURL(for transfer: RecoverableTransfer) async throws -> URL {
+        var best: (url: URL, progress: Int)?
+        for url in transfer.destinations.compactMap(\.manifestURL) {
+            guard fileManager.fileExists(atPath: url.path),
+                  let manifest = try? await manifestStore.load(from: url),
+                  manifest.transferID == transfer.id else { continue }
+            let recorded = progress(manifest)
+            if recorded > best?.progress ?? -1 { best = (url, recorded) }
         }
-        return url
+        guard let best else { throw RecoveryError.manifestUnreadable(transfer.name) }
+        return best.url
     }
 
     /// A read-only rendering of the durable record. Opens nothing for writing and

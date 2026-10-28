@@ -818,6 +818,41 @@ struct FaultInjectionTests {
             try await fixture.expectSourceUnchanged(before)
         }
     }
+
+    @Test("A network Primary whose record is a batch behind resumes from the local Backup's record")
+    func resumeFromFurthestRecord() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [0]) { fixture in
+            let before = try await fixture.sourceSnapshot()
+            // Same point as `terminationMidNetworkBatch`, with the network share
+            // as Primary: its record marks the first two files in progress, the
+            // local Backup's record knows the first one was copied to both.
+            let budget = SaveBudget(limit: 6)
+            let store = ManifestStore { _, _ in await budget.consume() }
+            await #expect(throws: (any Error).self) {
+                try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+                    .execute(plan: fixture.plan)
+            }
+            #expect(fixture.result(try await fixture.manifest(index: 0), "first.CR3", index: 0).copyState == .copying)
+            let inode = try fixture.stagedInode("first.CR3", index: 0)
+
+            let recovery = RecoveryCoordinator()
+            // The roots the app would resolve from this transfer's own bookmarks.
+            let roots = Dictionary(uniqueKeysWithValues: zip(fixture.plan.destinations.map(\.id),
+                                                             fixture.destinationRoots.map { SecurityScopedAccess.unscoped($0) }))
+            let transfer = try #require(await recovery.scan(destinationRoots: fixture.destinationRoots,
+                                                            transferDestinationRoots: [fixture.plan.id: roots])
+                .transfers.first)
+            let manifestURL = try await recovery.resumeManifestURL(for: transfer)
+            #expect(manifestURL == fixture.manifestURL(index: 1))
+
+            let resumed = try await fixture.coordinator(networkManifestBatchFiles: 2)
+                .resume(plan: fixture.plan, manifestURL: manifestURL)
+            #expect(resumed.state == .verified)
+            // Read back and verified where it was, not removed and copied again.
+            #expect(try fixture.stagedInode("first.CR3", index: 0) == inode)
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
 }
 
 // MARK: - Test doubles

@@ -73,6 +73,7 @@ above the store: no error handling runs, nothing is tidied up, the record simply
 | One destination stopping mid-file while the same read feeds the other, in either order | `oneDestinationStopsMidFile` |
 | A network copy starting before its record names it in progress | `networkRecordLeadsEveryCopy` |
 | Termination mid-batch, with a network record behind the local one | `terminationMidNetworkBatch` |
+| Resuming a network Primary whose record is behind its local Backup's | `resumeFromFurthestRecord` |
 | Destination attribute write refused after a good copy | `failedTimestampNeverFailsTheCopy` (in `TimestampTests.swift`) |
 
 ## Notes on two of the harder cases
