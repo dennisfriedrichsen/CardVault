@@ -46,8 +46,10 @@ Both values are estimates and are labelled as such in the UI ("Estimated ·
 | `rateSampleInterval` | 0.1 s | Bounds retained samples to about 50 per phase, and sets the shortest window a rate may be computed from. |
 | `chunkBytes` | 1 MiB | Unchanged from V1. Large enough to keep syscall overhead irrelevant on SD cards, small enough to keep cancellation responsive at chunk granularity. |
 | `destinationConcurrency` | 1 | Sequential by default. See below. |
+| `networkManifestBatchFiles` | 16 | A network destination's record is saved once per this many files. See "Work per file in the copy phase". |
+| `networkManifestBatchBytes` | 512 MiB | Caps a batch of large video files, so a crash mid-batch costs at most this much re-copying. |
 
-All five live in `TransferTuning`, are injected into `TransferCoordinator`, and
+All seven live in `TransferTuning`, are injected into `TransferCoordinator`, and
 are internal tuning values rather than user-facing settings.
 
 ### Why the byte-count trigger was removed
@@ -92,19 +94,95 @@ These require the physical devices and are not yet recorded:
   and after this change.
 - Sequential versus `destinationConcurrency: 2` on a representative SD card
   reader plus two *separate* external drives.
+- Copy throughput from a real card reader, rather than a local source folder, to
+  a local primary plus an NFS or SMB backup.
 - Rate and estimate stability on a UHS-I card, where per-file overhead is a much
   larger share of elapsed time than on the SSD above.
 
 Record results in this table when the runs happen; change
 `TransferTuning.default` only alongside a row here that justifies it.
 
+## Work per file in the copy phase
+
+Each file used to be read from the card once to hash it and then once more for
+every destination, and the manifest was saved to every destination before and
+after each destination's copy. With a network backup, that made the server's
+round trips, not the card, set the pace: one real transfer to an NFS share over
+Wi-Fi spent as many RPCs on manifest creates, renames, locks and commits as on
+photo data, and the card sat mostly idle.
+
+The copy now reads each file once and writes every chunk to all destinations
+before reading the next chunk. Like the hashing pass, that read computes a
+digest, and a file whose second read disagrees with the first is failed at
+every destination as `sourceChanged` instead of being caught later as a
+verification mismatch. The hashing pass
+itself stays separate, so the recorded source digest still comes from a read
+independent of the one that produced the copies.
+
+Each destination's failure is still its own: a destination that stops is closed,
+its partial file removed, and its error recorded, while the others finish the
+same file from the same read. Every copy is still flushed, sized, and read back
+for verification.
+
+Per file, with two destinations:
+
+| | Before | After |
+| --- | --- | --- |
+| Reads of the source | 3 | 2 |
+| Manifest saves, copy phase | 8 | 2, plus 1 per batch on the network record |
+| Manifest saves, verification | 4 | 1, plus 1 per batch on the network record |
+| Files written per manifest save | 3 (temp, `.atomic` temp, `.previous` copy) | 1 (`.previous` is a hard link) |
+
+Before any byte of a file is written, every copy about to start is recorded as
+`copying`, so recovery's rule — only a file the manifest records as in progress
+may be removed and retried — holds for every destination at once. A local
+destination's record is saved per file. A network destination's record is saved
+once per batch (16 files or 512 MiB): before a batch's first copy it marks every
+file of the batch as `copying`, and the results ride along with the next batch
+or the phase's closing save. A record that is behind only claims less than is
+true, and recovery resumes from the furthest-along one, so a crash mid-batch
+costs re-copying that batch, never a claim made without a read. The contract is
+in `manifest-schema-v1.md`. `FaultInjectionTests` pins the counts
+(`sourceReadsPerFile`, `manifestSavesPerFile`, `networkManifestSavesPerBatch`)
+and the ordering (`networkRecordLeadsEveryCopy`, `terminationMidNetworkBatch`).
+
+### Measured against a network backup
+
+`ProgressBenchmark/measureNetworkBackup` copies 64 raw-sized files (6 MiB each,
+384 MiB) to a local primary and to a folder on a network share, then verifies
+both. It is opt-in:
+
+```bash
+CARDVAULT_BENCH_NETWORK_DESTINATION=/Volumes/share/scratch swift test --disable-sandbox -Xswiftc -DCARDVAULT_BENCHMARK --filter ProgressBenchmark/measureNetworkBackup
+```
+
+NFSv3 share (`rsize`/`wsize` 32 KiB) on a ZFS NAS, reached over Wi-Fi 6E at a
+1200 Mbps link rate, 3.8 ms round trip. A plain sequential read from the same
+share measured 49 MB/s. Two interleaved runs each, Debug build:
+
+| Build | Elapsed | Per file | Payload rate |
+| --- | --- | --- | --- |
+| Before (one read per destination, saves per file and destination) | 320–347 s | 5.0–5.4 s | 1.2–1.3 MB/s |
+| Single read, saves per file | 154–181 s | 2.4–2.8 s | 2.2–2.6 MB/s |
+| Single read, network record per batch, linked `.previous` | 31–36 s | 0.48–0.56 s | 11.2–13.0 MB/s |
+
+The remaining gap to the share's sequential rate is per-file work that no batch
+removes: each copy's flush is a commit on the server, dates are set and read back,
+and the copy is read back in full for verification.
+
+`ProgressBenchmark` before and after, three runs each on this machine's SSD:
+snapshot rates are unchanged (5–11 per second), and elapsed times overlap
+within run-to-run noise (dual-destination: 1.5–3.9 s before, 1.9–3.1 s after).
+Both destinations of that benchmark sit on the same fast flash, which is the case
+this change helps least; the network table above is where it shows.
+
 ## What did not change
 
 Copy at 100 percent is a phase boundary, never a result. `TransferProgress`
 exposes `isPhaseComplete` for the phase only, the copy card says "Copy complete —
 verification still in progress", and the only success indicator in the UI reads
-from `TransferOutcome`. Checksums, flush and close ordering, manifest writes, the
+from `TransferOutcome`. Checksums, flush and close ordering, the
 existing-conflict rules, and whole-file resume are untouched: verification still
 computes one SHA-256 per destination copy and compares it to the source digest,
-and manifest updates are still applied and persisted serially in destination
-order even when the hashing that produced them ran concurrently.
+and manifest updates are still applied in destination order even when the
+hashing that produced them ran concurrently; they are persisted once per file.

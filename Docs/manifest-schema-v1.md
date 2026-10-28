@@ -97,5 +97,19 @@ and written to; a path that could leave the transfer's own tree makes the record
 whole, so it is reported rather than acted on. Every site that turns one of those paths into a file
 operation checks containment again, so the guarantee does not rest on decoding alone.
 
-Updates are written to a sibling temporary file, then replace the current manifest. The preceding
-valid manifest is retained as `transfer-manifest.json.previous` for recovery from a damaged update.
+Updates are written to a sibling temporary file, which is then renamed over the current manifest, so
+the manifest's name never goes missing. The preceding valid manifest is retained as
+`transfer-manifest.json.previous` for recovery from a damaged update: a hard link to the replaced
+file where the format supports one, and a copy where it does not (FAT-family). The rename never
+writes into the replaced file, so the link keeps the previous update intact.
+
+Every destination holds the same document, but not always the same revision of it. A local
+destination's record is saved after every file. A network destination's record is saved once per
+batch of files (`TransferTuning.networkManifestBatchFiles` and `networkManifestBatchBytes`), because
+each save there is a run of synchronous round trips to the server. Before a batch's first copy, the
+network record marks every file of the batch about to be copied as `copying`, so no byte reaches a
+network destination before its record names that file in progress. Only files still `pending`, at
+paths where nothing exists yet, are marked ahead. A network record that is behind therefore only
+ever claims less than is true: a finished copy still marked `copying` is copied again, and an
+unrecorded verification is read again. Recovery resumes from the destination whose record shows the
+most progress, and `copying` counts for none.

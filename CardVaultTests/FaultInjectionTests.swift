@@ -630,9 +630,242 @@ struct FaultInjectionTests {
             try await fixture.expectSourceUnchanged(before)
         }
     }
+
+    @Test("A destination that stops mid-file leaves the other copy of that file verified", arguments: [0, 1])
+    func oneDestinationStopsMidFile(failing: Int) async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let before = try await fixture.sourceSnapshot()
+            let surviving = 1 - failing
+            // Both copies are fed from the same read of the card, so the one that
+            // stops must not take the other down with it, in either order.
+            let injector = FaultInjector(rules: [
+                .init(.write, pathContains: "\(fixture.destinationRoots[failing].lastPathComponent)/",
+                      after: 1, effect: .stop(afterBytes: 40_000, reporting: .deviceFull))
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .partiallySuccessful)
+            #expect(outcome.destinations[surviving].isVerified)
+            #expect(outcome.destinations[surviving].finalURL == fixture.finalRoot(index: surviving))
+            #expect(outcome.destinations[failing].failedFiles == 1)
+            #expect(outcome.destinations[failing].finalURL == nil)
+            let manifest = try await fixture.manifest(index: failing)
+            let failed = fixture.result(manifest, "second.CR3", index: failing)
+            #expect(failed.copyState == .failed)
+            #expect(failed.error?.contains("destinationFull") == true)
+            #expect(!FileManager.default.fileExists(atPath: fixture.stagedURL("second.CR3", index: failing).path))
+            #expect(fixture.result(manifest, "second.CR3", index: surviving).verification == .verified)
+            #expect(try fixture.stagedContents("second.CR3", index: surviving) == fixture.contents("second.CR3"))
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
+
+    @Test("A source that reads differently while copying fails every destination of that file")
+    func sourceDisagreesWithItsHash() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let mutating = fixture.source.appending(path: "DCIM/second.CR3")
+            // Same size, different bytes: only the digest can tell, and the copy's
+            // own read is the one place that sees it before verification would.
+            let changed = Data(repeating: 7, count: Int(fixture.fileByteCount))
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: "DCIM/second.CR3", after: 1,
+                      effect: .interpose { try? changed.write(to: mutating) })
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .failed)
+            let manifest = try await fixture.manifest()
+            for index in fixture.destinationRoots.indices {
+                let result = fixture.result(manifest, "second.CR3", index: index)
+                #expect(result.copyState == .failed)
+                #expect(result.error?.contains("sourceChanged") == true)
+                #expect(!FileManager.default.fileExists(atPath: fixture.stagedURL("second.CR3", index: index).path))
+                #expect(fixture.result(manifest, "first.CR3", index: index).verification == .verified)
+            }
+            #expect(try Data(contentsOf: mutating) == changed)
+        }
+    }
+
+    // MARK: - Work per file
+
+    @Test("The card is read twice per file however many destinations it feeds")
+    func sourceReadsPerFile() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let reads = Tally()
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: "/CARD/", effect: .interpose { await reads.add() }, repeats: true)
+            ])
+
+            let outcome = try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            // One read to hash, one read that feeds every copy.
+            #expect(await reads.count == 2 * fixture.fileNames.count)
+        }
+    }
+
+    @Test("Manifest updates are per file, not per file and destination")
+    func manifestSavesPerFile() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let copying = Tally()
+            let verifying = Tally()
+            let store = ManifestStore { manifest, _ in
+                if manifest.state == .copying { await copying.add() }
+                if manifest.state == .verifying { await verifying.add() }
+                return nil
+            }
+
+            let outcome = try await fixture.coordinator(manifestStore: store).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            let files = fixture.fileNames.count
+            let locations = fixture.destinationRoots.count
+            // Copying: the phase start, then in progress and done for each file.
+            #expect(await copying.count == (1 + 2 * files) * locations)
+            // Verifying: the phase start, then one record per file.
+            #expect(await verifying.count == (1 + files) * locations)
+        }
+    }
+
+    // MARK: - Network destinations
+
+    @Test("A network destination's record is saved once per batch of files, a local one once per file")
+    func networkManifestSavesPerBatch() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [1]) { fixture in
+            let network = fixture.destinationRoots[1].lastPathComponent
+            let local = Tally()
+            let remote = Tally()
+            let store = ManifestStore { manifest, url in
+                guard manifest.state == .copying || manifest.state == .verifying else { return nil }
+                if url.path.contains("/\(network)/") { await remote.add() } else { await local.add() }
+                return nil
+            }
+
+            let outcome = try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+                .execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            // Three files in batches of two: batches start at the first and third.
+            // Copying and verifying each add their phase-start save.
+            #expect(await local.count == (1 + 2 * 3) + (1 + 3))
+            #expect(await remote.count == (1 + 2) + (1 + 2))
+        }
+    }
+
+    @Test("Every network copy is recorded as in progress there before its first byte lands")
+    func networkRecordLeadsEveryCopy() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [1]) { fixture in
+            let networkManifest = fixture.manifestURL(index: 1)
+            let backupID = fixture.plan.destinations[1].id
+            let observed = StateLog()
+            // Pass 0 of each name is the local copy; pass 1 is the network one.
+            let injector = FaultInjector(rules: fixture.fileNames.map { name in
+                .init(.write, pathContains: name, after: 1, effect: .interpose {
+                    let record = try? await ManifestStore().load(from: networkManifest)
+                    let file = record?.files.first { $0.relativeSourcePath.hasSuffix(name) }
+                    await observed.record(name, file?.destinations[backupID]?.copyState)
+                })
+            })
+
+            let outcome = try await fixture.coordinator(injector: injector, networkManifestBatchFiles: 2)
+                .execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            let states = await observed.states
+            #expect(states.count == fixture.fileNames.count)
+            #expect(fixture.fileNames.allSatisfy { states[$0] == .copying })
+        }
+    }
+
+    @Test("A process that dies mid-batch leaves a network record that claims less than is true")
+    func terminationMidNetworkBatch() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [1]) { fixture in
+            let before = try await fixture.sourceSnapshot()
+            // Saves: phase start (local, network), first file before its copy
+            // (local, network for the batch of two), first file after (local),
+            // second file before (local). The second file's copies then land,
+            // and the record of them never does.
+            let budget = SaveBudget(limit: 6)
+            let store = ManifestStore { _, _ in await budget.consume() }
+
+            await #expect(throws: (any Error).self) {
+                try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+                    .execute(plan: fixture.plan)
+            }
+
+            let network = try await fixture.manifest(index: 1)
+            for name in ["first.CR3", "second.CR3"] {
+                // Whole copies on disk, recorded only as in progress: eligible for
+                // a retry, never mistaken for a finished copy.
+                #expect(FileManager.default.fileExists(atPath: fixture.stagedURL(name, index: 1).path))
+                #expect(fixture.result(network, name, index: 1).copyState == .copying)
+            }
+            #expect(fixture.result(network, "third.jpg", index: 1).copyState == .pending)
+            #expect(fixture.noFileIsVerified(network))
+            // Recovery resumes from the record that knows the most: the local one.
+            let transfer = try #require(try await fixture.recoveryScan().transfers.first)
+            #expect(fixture.result(transfer.manifest, "first.CR3", index: 1).copyState == .copied)
+
+            let resumed = try await fixture.coordinator(networkManifestBatchFiles: 2)
+                .resume(plan: fixture.plan, manifestURL: fixture.manifestURL(index: 0))
+            #expect(resumed.state == .verified)
+            #expect(resumed.destinations.allSatisfy { $0.verifiedFiles == fixture.fileNames.count })
+            for name in fixture.fileNames {
+                #expect(try fixture.stagedContents(name, index: 1) == fixture.contents(name))
+            }
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
+
+    @Test("A network Primary whose record is a batch behind resumes from the local Backup's record")
+    func resumeFromFurthestRecord() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [0]) { fixture in
+            let before = try await fixture.sourceSnapshot()
+            // Same point as `terminationMidNetworkBatch`, with the network share
+            // as Primary: its record marks the first two files in progress, the
+            // local Backup's record knows the first one was copied to both.
+            let budget = SaveBudget(limit: 6)
+            let store = ManifestStore { _, _ in await budget.consume() }
+            await #expect(throws: (any Error).self) {
+                try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+                    .execute(plan: fixture.plan)
+            }
+            #expect(fixture.result(try await fixture.manifest(index: 0), "first.CR3", index: 0).copyState == .copying)
+            let inode = try fixture.stagedInode("first.CR3", index: 0)
+
+            let recovery = RecoveryCoordinator()
+            // The roots the app would resolve from this transfer's own bookmarks.
+            let roots = Dictionary(uniqueKeysWithValues: zip(fixture.plan.destinations.map(\.id),
+                                                             fixture.destinationRoots.map { SecurityScopedAccess.unscoped($0) }))
+            let transfer = try #require(await recovery.scan(destinationRoots: fixture.destinationRoots,
+                                                            transferDestinationRoots: [fixture.plan.id: roots])
+                .transfers.first)
+            let manifestURL = try await recovery.resumeManifestURL(for: transfer)
+            #expect(manifestURL == fixture.manifestURL(index: 1))
+
+            let resumed = try await fixture.coordinator(networkManifestBatchFiles: 2)
+                .resume(plan: fixture.plan, manifestURL: manifestURL)
+            #expect(resumed.state == .verified)
+            // Read back and verified where it was, not removed and copied again.
+            #expect(try fixture.stagedInode("first.CR3", index: 0) == inode)
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
 }
 
 // MARK: - Test doubles
+
+private actor StateLog {
+    private(set) var states: [String: CopyState] = [:]
+    func record(_ name: String, _ state: CopyState?) { states[name] = state }
+}
+
+private actor Tally {
+    private(set) var count = 0
+    func add() { count += 1 }
+}
 
 /// A clock the test moves by hand, so a ten-minute sleep costs no wall time and
 /// happens at exactly the same point on every run.
@@ -723,12 +956,14 @@ private struct FaultFixture {
 
     func coordinator(injector: FaultInjector? = nil,
                      manifestStore: ManifestStore = ManifestStore(),
+                     networkManifestBatchFiles: Int = 16,
                      now: (@Sendable () -> Date)? = nil) -> TransferCoordinator {
         // A small chunk keeps every fault landing mid-file while the fixture
         // stays small enough to run in a temporary directory.
         TransferCoordinator(fileSystem: LocalFileSystem(injector: injector, chunkBytes: 16_384),
                             manifestStore: manifestStore,
-                            tuning: TransferTuning(chunkBytes: 16_384),
+                            tuning: TransferTuning(chunkBytes: 16_384,
+                                                   networkManifestBatchFiles: networkManifestBatchFiles),
                             now: now ?? { Date() })
     }
 
@@ -820,7 +1055,7 @@ private extension TransferManifest {
     }
 }
 
-private func withFaultFixture(destinationCount: Int = 1,
+private func withFaultFixture(destinationCount: Int = 1, networkDestinations: Set<Int> = [],
                               _ body: (FaultFixture) async throws -> Void) async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "CardVaultFaultTests-\(UUID().uuidString)")
@@ -844,6 +1079,7 @@ private func withFaultFixture(destinationCount: Int = 1,
     let destinations = destinationRoots.enumerated().map { index, url in
         DestinationPlan(label: index == 0 ? "Primary" : "Backup", rootPath: url.path,
                         volume: VolumeIdentity(displayName: url.lastPathComponent, fileSystem: "APFS",
+                                               isLocal: !networkDestinations.contains(index),
                                                physicalStoreIdentifier: "disk\(index)"))
     }
     let files = try SourceScanner().scan(root: source, mode: .preserveCard).files

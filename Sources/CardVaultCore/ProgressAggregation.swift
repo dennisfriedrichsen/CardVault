@@ -20,17 +20,30 @@ public struct TransferTuning: Sendable, Equatable {
     /// Upper bound on destinations verified at the same time. `1` keeps the
     /// strictly sequential V1 behaviour.
     public var destinationConcurrency: Int
+    /// Most files a network destination's manifest may fall behind by. Every
+    /// manifest save on a network mount is a run of synchronous round trips to
+    /// the server, so a network record is written once per batch of files
+    /// rather than once per file. Losing a batch to a crash costs re-copying or
+    /// re-reading it, never a claim made without a read.
+    public var networkManifestBatchFiles: Int
+    /// Most bytes a network destination's manifest may fall behind by, so a
+    /// batch of large video files stays as small as one of them.
+    public var networkManifestBatchBytes: Int64
 
     public init(progressInterval: TimeInterval = 0.2,
                 rateWindow: TimeInterval = 5,
                 rateSampleInterval: TimeInterval = 0.1,
                 chunkBytes: Int = 1_048_576,
-                destinationConcurrency: Int = 1) {
+                destinationConcurrency: Int = 1,
+                networkManifestBatchFiles: Int = 16,
+                networkManifestBatchBytes: Int64 = 512 * 1_048_576) {
         self.progressInterval = progressInterval
         self.rateWindow = rateWindow
         self.rateSampleInterval = rateSampleInterval
         self.chunkBytes = chunkBytes
         self.destinationConcurrency = max(1, destinationConcurrency)
+        self.networkManifestBatchFiles = max(1, networkManifestBatchFiles)
+        self.networkManifestBatchBytes = max(1, networkManifestBatchBytes)
     }
 
     public static let `default` = TransferTuning()
