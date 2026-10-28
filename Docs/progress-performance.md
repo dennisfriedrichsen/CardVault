@@ -46,8 +46,10 @@ Both values are estimates and are labelled as such in the UI ("Estimated ·
 | `rateSampleInterval` | 0.1 s | Bounds retained samples to about 50 per phase, and sets the shortest window a rate may be computed from. |
 | `chunkBytes` | 1 MiB | Unchanged from V1. Large enough to keep syscall overhead irrelevant on SD cards, small enough to keep cancellation responsive at chunk granularity. |
 | `destinationConcurrency` | 1 | Sequential by default. See below. |
+| `networkManifestBatchFiles` | 16 | A network destination's record is saved once per this many files. See "Work per file in the copy phase". |
+| `networkManifestBatchBytes` | 512 MiB | Caps a batch of large video files, so a crash mid-batch costs at most this much re-copying. |
 
-All five live in `TransferTuning`, are injected into `TransferCoordinator`, and
+All seven live in `TransferTuning`, are injected into `TransferCoordinator`, and
 are internal tuning values rather than user-facing settings.
 
 ### Why the byte-count trigger was removed
@@ -92,8 +94,8 @@ These require the physical devices and are not yet recorded:
   and after this change.
 - Sequential versus `destinationConcurrency: 2` on a representative SD card
   reader plus two *separate* external drives.
-- Copy throughput from a card reader to a local primary plus an NFS or SMB
-  backup, before and after the single-read copy described above.
+- Copy throughput from a real card reader, rather than a local source folder, to
+  a local primary plus an NFS or SMB backup.
 - Rate and estimate stability on a UHS-I card, where per-file overhead is a much
   larger share of elapsed time than on the SSD above.
 
@@ -127,23 +129,52 @@ Per file, with two destinations:
 | | Before | After |
 | --- | --- | --- |
 | Reads of the source | 3 | 2 |
-| Manifest saves, copy phase | 8 | 4 |
-| Manifest saves, verification | 4 | 2 |
-| Temporary files per manifest save | 2 | 1 |
+| Manifest saves, copy phase | 8 | 2, plus 1 per batch on the network record |
+| Manifest saves, verification | 4 | 1, plus 1 per batch on the network record |
+| Files written per manifest save | 3 (temp, `.atomic` temp, `.previous` copy) | 1 (`.previous` is a hard link) |
 
 Before any byte of a file is written, every copy about to start is recorded as
-`copying` in one save, so recovery's rule — only a file the manifest records as
-in progress may be removed and retried — holds for every destination at once. A
-verification result lost between two saves is only a copy read back again on
-resume. `FaultInjectionTests` pins both counts (`sourceReadsPerFile`,
-`manifestSavesPerFile`).
+`copying`, so recovery's rule — only a file the manifest records as in progress
+may be removed and retried — holds for every destination at once. A local
+destination's record is saved per file. A network destination's record is saved
+once per batch (16 files or 512 MiB): before a batch's first copy it marks every
+file of the batch as `copying`, and the results ride along with the next batch
+or the phase's closing save. A record that is behind only claims less than is
+true, and recovery resumes from the furthest-along one, so a crash mid-batch
+costs re-copying that batch, never a claim made without a read. The contract is
+in `manifest-schema-v1.md`. `FaultInjectionTests` pins the counts
+(`sourceReadsPerFile`, `manifestSavesPerFile`, `networkManifestSavesPerBatch`)
+and the ordering (`networkRecordLeadsEveryCopy`, `terminationMidNetworkBatch`).
+
+### Measured against a network backup
+
+`ProgressBenchmark/measureNetworkBackup` copies 64 raw-sized files (6 MiB each,
+384 MiB) to a local primary and to a folder on a network share, then verifies
+both. It is opt-in:
+
+```bash
+CARDVAULT_BENCH_NETWORK_DESTINATION=/Volumes/share/scratch swift test --disable-sandbox -Xswiftc -DCARDVAULT_BENCHMARK --filter ProgressBenchmark/measureNetworkBackup
+```
+
+NFSv3 share (`rsize`/`wsize` 32 KiB) on a ZFS NAS, reached over Wi-Fi 6E at a
+1200 Mbps link rate, 3.8 ms round trip. A plain sequential read from the same
+share measured 49 MB/s. Two interleaved runs each, Debug build:
+
+| Build | Elapsed | Per file | Payload rate |
+| --- | --- | --- | --- |
+| Before (one read per destination, saves per file and destination) | 320–347 s | 5.0–5.4 s | 1.2–1.3 MB/s |
+| Single read, saves per file | 154–181 s | 2.4–2.8 s | 2.2–2.6 MB/s |
+| Single read, network record per batch, linked `.previous` | 31–36 s | 0.48–0.56 s | 11.2–13.0 MB/s |
+
+The remaining gap to the share's sequential rate is per-file work that no batch
+removes: each copy's flush is a commit on the server, dates are set and read back,
+and the copy is read back in full for verification.
 
 `ProgressBenchmark` before and after, three runs each on this machine's SSD:
 snapshot rates are unchanged (5–11 per second), and elapsed times overlap
 within run-to-run noise (dual-destination: 1.5–3.9 s before, 1.9–3.1 s after).
-Both destinations of the benchmark sit on the same fast flash, which is the case
-this change helps least; a measurement on a real card reader with a network
-backup belongs under "Still to measure on hardware".
+Both destinations of that benchmark sit on the same fast flash, which is the case
+this change helps least; the network table above is where it shows.
 
 ## What did not change
 

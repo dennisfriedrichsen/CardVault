@@ -104,8 +104,16 @@ public actor ManifestStore {
         try data.write(to: temporary)
         if fileManager.fileExists(atPath: url.path) {
             if fileManager.fileExists(atPath: backup.path) { try? fileManager.removeItem(at: backup) }
-            try fileManager.copyItem(at: url, to: backup)
-            _ = try fileManager.replaceItemAt(url, withItemAt: temporary)
+            // A second name for the current record rather than a copy of it: one
+            // round trip instead of a create, a write, and a flush. The rename
+            // below swaps in a new file and never writes into the old one, so the
+            // linked record keeps the previous update intact. FAT-family formats
+            // have no hard links and take the copy instead.
+            do { try fileManager.linkItem(at: url, to: backup) }
+            catch { try fileManager.copyItem(at: url, to: backup) }
+            // `rename` replaces atomically: recovery finds a transfer by its
+            // manifest's name, so there is never a moment it is missing.
+            guard rename(temporary.path, url.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         } else {
             try fileManager.moveItem(at: temporary, to: url)
         }

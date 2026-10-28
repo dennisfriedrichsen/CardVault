@@ -74,6 +74,33 @@ struct CoreTests {
         }
     }
 
+    @Test("The previous update is a separate file that later saves never write into")
+    func manifestBackupIsIndependent() async throws {
+        try await withTemporaryDirectory { root in
+            let url = root.appending(path: "manifest.json")
+            let backup = url.appendingPathExtension("previous")
+            let store = ManifestStore()
+            var manifest = TransferManifest(plan: makePlan(source: root, destinations: [], files: []))
+            try await store.save(manifest, to: url)
+            manifest.state = .copying
+            try await store.save(manifest, to: url)
+            manifest.state = .verifying
+            try await store.save(manifest, to: url)
+
+            #expect(try await store.load(from: url).state == .verifying)
+            #expect(try await store.load(from: backup).state == .copying)
+            // The backup is linked, not copied, so it must not share the current
+            // record's inode: a write into one would otherwise damage both.
+            func inode(_ url: URL) throws -> Int {
+                try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as? Int ?? -1
+            }
+            #expect(try inode(url) != inode(backup))
+            // No temporary files are left beside the record.
+            let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            #expect(Set(names) == ["manifest.json", "manifest.json.previous"])
+        }
+    }
+
     @Test("Scanner preserves paths, classifies media, and counts physical RAW/JPEG files")
     func scanMedia() throws {
         try withTemporaryDirectorySync { root in

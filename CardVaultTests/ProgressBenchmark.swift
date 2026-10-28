@@ -19,6 +19,46 @@ struct ProgressBenchmark {
         try await run(label: "dual-concurrent", destinationCount: 2, tuning: TransferTuning(destinationConcurrency: 2))
     }
 
+    /// A local primary plus a backup on a network mount, the shape where per-file
+    /// manifest saves cost a round trip each. Opt-in: set
+    /// `CARDVAULT_BENCH_NETWORK_DESTINATION` to a writable folder on the share.
+    /// Each run works in its own new subfolder there and removes it afterwards.
+    @Test("Measure a local primary with a network backup",
+          .enabled(if: ProcessInfo.processInfo.environment["CARDVAULT_BENCH_NETWORK_DESTINATION"] != nil))
+    func measureNetworkBackup() async throws {
+        let share = URL(filePath: ProcessInfo.processInfo.environment["CARDVAULT_BENCH_NETWORK_DESTINATION"] ?? "",
+                        directoryHint: .isDirectory)
+        let root = FileManager.default.temporaryDirectory.appending(path: "CardVaultBench-\(UUID().uuidString)")
+        let remote = share.appending(path: "CardVaultBench-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appending(path: "source/DCIM"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appending(path: "primary"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: remote)
+        }
+        // Raw-photo-sized files: per-file overhead is what this run is about.
+        for index in 0..<64 {
+            try Data(repeating: UInt8(index), count: 6 * 1_048_576)
+                .write(to: root.appending(path: "source/DCIM/IMG_\(index).CR3"))
+        }
+        let files = try SourceScanner().scan(root: root.appending(path: "source"), mode: .preserveCard).files
+        let plan = TransferPlan(
+            name: "Bench", mode: .preserveCard, sourceRootPath: root.appending(path: "source").path,
+            sourceVolume: VolumeIdentity(displayName: "CARD", isRemovable: true), files: files,
+            destinations: [
+                DestinationPlan(label: "Primary", rootPath: root.appending(path: "primary").path,
+                                volume: VolumeIdentity(displayName: "primary", physicalStoreIdentifier: "disk0")),
+                DestinationPlan(label: "Backup", rootPath: remote.path,
+                                volume: VolumeIdentity(displayName: "share", isLocal: false)),
+            ])
+        let start = Date()
+        let outcome = try await TransferCoordinator().execute(plan: plan)
+        let elapsed = Date().timeIntervalSince(start)
+        let megabytes = Double(plan.totalBytes) / 1_000_000
+        print("BENCH network-backup state=\(outcome.state) files=\(files.count) bytes=\(plan.totalBytes) elapsed=\(String(format: "%.1f", elapsed))s payload=\(String(format: "%.1f", megabytes / elapsed))MBps perFile=\(String(format: "%.2f", elapsed / Double(files.count)))s")
+    }
+
     private func run(label: String, destinationCount: Int, tuning: TransferTuning) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "CardVaultBench-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appending(path: "source/DCIM"), withIntermediateDirectories: true)

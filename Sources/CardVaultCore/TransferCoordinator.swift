@@ -62,6 +62,12 @@ public actor TransferCoordinator {
     /// possible to reread exactly those.
     private var readBackThisRun: Set<ReadBack> = []
 
+    /// Per network destination, the last file its durable record already
+    /// covers: as in progress before copying, or as allowed to wait for the next
+    /// save after verifying. Every full save clears it, because a full save
+    /// writes the in-memory record, which marks nothing ahead.
+    private var networkRecordCovers: [UUID: Int] = [:]
+
     /// Precise counters live here, on the coordinator. Only throttled snapshots
     /// ever reach the progress handler, so a fast drive cannot flood the caller.
     private var aggregator: ProgressAggregator?
@@ -97,7 +103,8 @@ public actor TransferCoordinator {
                      progress: ProgressHandler?) async throws -> TransferOutcome {
         progressHandler = progress
         readBackThisRun = []
-        defer { progressHandler = nil; aggregator = nil; readBackThisRun = [] }
+        networkRecordCovers = [:]
+        defer { progressHandler = nil; aggregator = nil; readBackThisRun = []; networkRecordCovers = [:] }
         manifest.state = .copying
         try await persist(manifest, locations: locations)
 
@@ -172,7 +179,74 @@ public actor TransferCoordinator {
     }
 
     private func persist(_ manifest: TransferManifest, locations: [Location]) async throws {
+        networkRecordCovers = [:]
         for location in locations { try await manifestStore.save(manifest, to: location.manifestURL) }
+    }
+
+    private enum Checkpoint {
+        /// Before a file's copies start: each one must already be recorded as in
+        /// progress wherever its bytes are about to land.
+        case beforeCopy
+        case afterCopy
+        case afterVerification
+    }
+
+    /// The per-file save. A local destination takes every update. A network
+    /// destination is written once per batch, because each save there is a run
+    /// of synchronous round trips to the server: before a batch's first copy,
+    /// its record marks every file of the batch that is about to be copied as
+    /// in progress, so recovery's rule — only a file recorded in progress may
+    /// be removed and retried — holds for each of them; the results follow
+    /// with the next batch, or with the phase's closing save.
+    ///
+    /// A record that is behind only ever claims less than is true: a finished
+    /// copy still marked in progress is copied again, an unrecorded
+    /// verification is read again, and recovery resumes from whichever
+    /// destination's record shows the most progress.
+    private func checkpoint(_ manifest: TransferManifest, fileIndex: Int, locations: [Location],
+                            _ moment: Checkpoint) async throws {
+        for location in locations {
+            guard !location.destination.volume.isLocal else {
+                try await manifestStore.save(manifest, to: location.manifestURL)
+                continue
+            }
+            let id = location.destination.id
+            if let covered = networkRecordCovers[id], fileIndex <= covered { continue }
+            let end = batchEnd(from: fileIndex, in: manifest)
+            var record = manifest
+            if moment == .beforeCopy {
+                await markInProgress(&record, after: fileIndex, through: end, location: location)
+            }
+            try await manifestStore.save(record, to: location.manifestURL)
+            if moment != .afterCopy { networkRecordCovers[id] = end }
+        }
+    }
+
+    private func batchEnd(from start: Int, in manifest: TransferManifest) -> Int {
+        var end = start
+        var bytes = manifest.files[start].byteCount
+        while end + 1 < manifest.files.count, end - start + 1 < tuning.networkManifestBatchFiles,
+              bytes + manifest.files[end + 1].byteCount <= tuning.networkManifestBatchBytes {
+            end += 1
+            bytes += manifest.files[end].byteCount
+        }
+        return end
+    }
+
+    /// Only a file nothing has happened to yet, at a path where nothing exists
+    /// yet, is marked ahead. Marking an existing file in progress would make it
+    /// eligible for removal, and an existing file is a conflict to classify
+    /// when the copy reaches it, never something to clear out of the way.
+    private func markInProgress(_ record: inout TransferManifest, after fileIndex: Int, through end: Int,
+                                location: Location) async {
+        guard fileIndex < end else { return }
+        let id = location.destination.id
+        for index in (fileIndex + 1)...end where record.files[index].destinations[id]?.copyState == .pending {
+            guard let url = TransferLayout.containedURL(relativePath: record.files[index].relativeDestinationPath,
+                                                        under: location.originalsRoot),
+                  await !fileSystem.exists(url) else { continue }
+            record.files[index].destinations[id]?.copyState = .copying
+        }
     }
 
     /// Error-path persistence, which must never make things worse than the
@@ -346,10 +420,8 @@ public actor TransferCoordinator {
             }
             if !pending.isEmpty {
                 // Every copy about to start is recorded as in progress before its
-                // first byte lands, so recovery may remove any of them — and one
-                // record per file, not per destination, is what keeps a network
-                // destination from spending more time on manifests than photos.
-                try await persist(manifest, locations: locations)
+                // first byte lands, so recovery may remove any of them.
+                try await checkpoint(manifest, fileIndex: index, locations: locations, .beforeCopy)
                 let failures = try await fileSystem.copyExclusive(
                     from: source, to: pending.map(\.url), expectedSize: file.byteCount,
                     expectedChecksum: manifest.files[index].sourceChecksum, onBytes: onBytes)
@@ -362,7 +434,7 @@ public actor TransferCoordinator {
                         await applyTimestamps(&manifest, fileIndex: index, location: location)
                     }
                 }
-                try await persist(manifest, locations: locations)
+                try await checkpoint(manifest, fileIndex: index, locations: locations, .afterCopy)
             }
             await completeFile()
         }
@@ -495,7 +567,9 @@ public actor TransferCoordinator {
             }
             // One record per file: a result lost to an interruption here is only
             // a copy read back again on resume, never a claim made without a read.
-            if !records.isEmpty { try await persist(manifest, locations: locations) }
+            if !records.isEmpty {
+                try await checkpoint(manifest, fileIndex: index, locations: locations, .afterVerification)
+            }
             await completeFile()
         }
         await flushPhase(currentRelativePath: .some(nil))
