@@ -64,6 +64,21 @@ struct ProgressTests {
         #expect(second?.estimatedSecondsRemaining == 4)
     }
 
+    @Test("The rate people read is in photo bytes while the estimate stays in work bytes")
+    func photoRateDividesOutPasses() {
+        // Two destinations: the hash plus two writes pass over every byte.
+        var aggregator = ProgressAggregator(phase: .copying, totalFiles: 1, totalBytes: 3_000, passesPerFile: 3,
+                                            tuning: TransferTuning(progressInterval: 1, rateWindow: 10,
+                                                                   rateSampleInterval: 0.5),
+                                            startedAt: origin)
+        _ = aggregator.record(bytes: 0, at: origin)
+        let snapshot = aggregator.record(bytes: 600, at: origin.addingTimeInterval(1))
+        #expect(snapshot?.bytesPerSecond == 600)
+        #expect(snapshot?.photoBytesPerSecond == 200)
+        // 2_400 work bytes remain at 600 work bytes per second.
+        #expect(snapshot?.estimatedSecondsRemaining == 4)
+    }
+
     @Test("A stale fast start does not inflate the estimate forever")
     func slidingWindow() {
         var aggregator = aggregator(totalBytes: 100_000,
@@ -152,6 +167,8 @@ struct ProgressTests {
             #expect(snapshots[lastCopy].completedFiles == plan.files.count)
             // Copy hashes the source once and writes it to each destination.
             #expect(snapshots[lastCopy].totalBytes == plan.totalBytes * 3)
+            #expect(snapshots[lastCopy].passesPerFile == 3)
+            #expect(snapshots[firstVerification].passesPerFile == 2)
             #expect(snapshots[firstVerification].completedBytes < snapshots[firstVerification].totalBytes)
             #expect(outcome.state == .verified)
         }

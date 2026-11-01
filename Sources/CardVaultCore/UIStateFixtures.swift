@@ -259,39 +259,44 @@ extension UIStateFixture {
 
     // MARK: - Progress
 
-    private static var workBytes: Int64 { scanResult.totalBytes * 3 }
+    /// A primary and a backup: the hash plus two writes when copying, two
+    /// read-backs when verifying.
+    private static let copyPasses = 3
+    private static let verifyPasses = 2
+    private static var copyWorkBytes: Int64 { scanResult.totalBytes * Int64(copyPasses) }
+    private static var verifyWorkBytes: Int64 { scanResult.totalBytes * Int64(verifyPasses) }
 
     static let copyingProgress = TransferProgress(
         phase: .copying, completedFiles: 5, totalFiles: 13,
-        completedBytes: workBytes * 2 / 5, totalBytes: workBytes,
+        completedBytes: copyWorkBytes * 2 / 5, totalBytes: copyWorkBytes,
         currentRelativePath: "DCIM/100EOS_R/IMG_0433.CR3",
-        bytesPerSecond: 96_000_000, estimatedSecondsRemaining: 74, elapsedSeconds: 48)
+        passesPerFile: copyPasses, bytesPerSecond: 96_000_000, estimatedSecondsRemaining: 74, elapsedSeconds: 48)
 
     static let copyCompleteProgress = TransferProgress(
         phase: .copying, completedFiles: 13, totalFiles: 13,
-        completedBytes: workBytes, totalBytes: workBytes,
+        completedBytes: copyWorkBytes, totalBytes: copyWorkBytes,
         currentRelativePath: "PRIVATE/M4ROOT/CLIP/C0007.MP4",
-        bytesPerSecond: 101_000_000, estimatedSecondsRemaining: 0, elapsedSeconds: 122)
+        passesPerFile: copyPasses, bytesPerSecond: 101_000_000, estimatedSecondsRemaining: 0, elapsedSeconds: 122)
 
     /// A copy stopped partway: what the interrupted, paused and failed states
     /// legitimately have in common is that the copy bar is not full.
     static let pausedCopyProgress = TransferProgress(
         phase: .copying, completedFiles: 7, totalFiles: 13,
-        completedBytes: workBytes * 3 / 5, totalBytes: workBytes,
+        completedBytes: copyWorkBytes * 3 / 5, totalBytes: copyWorkBytes,
         currentRelativePath: "DCIM/100EOS_R/IMG_0435.CR3",
-        bytesPerSecond: 88_000_000, estimatedSecondsRemaining: 51, elapsedSeconds: 96)
+        passesPerFile: copyPasses, bytesPerSecond: 88_000_000, estimatedSecondsRemaining: 51, elapsedSeconds: 96)
 
     static let verifyingProgress = TransferProgress(
         phase: .verifying, completedFiles: 6, totalFiles: 13,
-        completedBytes: workBytes * 2 / 5, totalBytes: workBytes,
+        completedBytes: verifyWorkBytes * 2 / 5, totalBytes: verifyWorkBytes,
         currentRelativePath: "DCIM/100EOS_R/IMG_0434.JPG",
-        bytesPerSecond: 210_000_000, estimatedSecondsRemaining: 33, elapsedSeconds: 29)
+        passesPerFile: verifyPasses, bytesPerSecond: 210_000_000, estimatedSecondsRemaining: 33, elapsedSeconds: 29)
 
     static let verifiedProgress = TransferProgress(
         phase: .verifying, completedFiles: 13, totalFiles: 13,
-        completedBytes: workBytes, totalBytes: workBytes,
+        completedBytes: verifyWorkBytes, totalBytes: verifyWorkBytes,
         currentRelativePath: nil,
-        bytesPerSecond: 214_000_000, estimatedSecondsRemaining: 0, elapsedSeconds: 61)
+        passesPerFile: verifyPasses, bytesPerSecond: 214_000_000, estimatedSecondsRemaining: 0, elapsedSeconds: 61)
 
     // MARK: - Outcomes
 
