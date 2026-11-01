@@ -22,8 +22,8 @@ properties so a verification update does not invalidate the copy view.
 `completedBytes` and `totalBytes` count *work* bytes rather than payload bytes.
 A file that is hashed at the source and written to two destinations contributes
 its size three times to the copy phase, and twice to the verification phase. The
-bar, the rate, and the estimate therefore all describe the same quantity, and a
-resumed transfer credits skipped work so the bar still reaches 100 percent.
+bar and the estimate therefore describe the same quantity, and a resumed
+transfer credits skipped work so the bar still reaches 100 percent.
 
 ### Rate and estimate
 
@@ -34,8 +34,17 @@ window shorter than one sampling interval reports no rate at all — a single
 fast chunk read from cache would otherwise be published as tens of gigabytes per
 second. The estimate is simply the remaining work bytes divided by that rate.
 
+The rate the UI shows is not that work rate. With two destinations every byte
+counts three times while copying, so a transfer delivering 2.2 MB/s of photos to
+each drive would read as 6.5 MB/s, and the same card would appear to speed up
+when a backup was added. Each snapshot carries the phase's `passesPerFile` (the
+hash plus one write per destination when copying, one read-back per destination
+when verifying), and `photoBytesPerSecond` divides it out: photo bytes per
+second, what each destination is receiving or having read back. The estimate
+stays on work bytes, because the work is what has to finish.
+
 Both values are estimates and are labelled as such in the UI ("Estimated ·
-420 MB/s · 2 min remaining"). Neither is used for any correctness decision.
+140 MB/s · 2 min remaining"). Neither is used for any correctness decision.
 
 ## Chosen thresholds
 

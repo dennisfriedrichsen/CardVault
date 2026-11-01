@@ -635,8 +635,10 @@ private struct ProgressPanel: View {
         return "Estimated · " + parts.joined(separator: " · ")
     }
 
+    /// Photo bytes, not work bytes: with two destinations the work rate is three
+    /// times what any drive is receiving, and would read as transfer speed.
     private func rateText(_ progress: TransferProgress) -> String? {
-        guard let rate = progress.bytesPerSecond, rate > 0, rate.isFinite else { return nil }
+        guard let rate = progress.photoBytesPerSecond, rate > 0, rate.isFinite else { return nil }
         return "\(Int64(rate).formatted(.byteCount(style: .file)))/s"
     }
 
