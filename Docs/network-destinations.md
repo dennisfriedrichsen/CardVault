@@ -114,6 +114,80 @@ really is safe to eject, so the state carries the success tone — but it says w
 because a green checkmark cannot, and the absence of a local copy is not discovered until the share is
 not mounted.
 
+## `._` sidecars on NFS
+
+Every file and folder created on an NFSv3 share gets an AppleDouble `._<name>` companion beside it:
+each copied original, the incomplete folder, `transfer-manifest.json`, `.previous`, and the
+manifest's temporary files. CardVault cannot prevent this.
+
+Measured on macOS 26 against the NFSv3 export above:
+
+- **The attribute is `com.apple.provenance`.** macOS stamps it on every file a process creates — 11
+  bytes recording which app wrote it — and NFSv3 has no extended attributes, so the client keeps it
+  in a `._` file. CardVault sets no extended attributes of its own. On a share, `xattr -l <file>`
+  reads the sidecar and lists what it holds.
+- **It is written at creation.** Setting modification and creation dates, which is all
+  `Timestamps.swift` does, does not create a sidecar on a file that lacks one, and neither does
+  appending to it.
+- **It cannot be removed.** `removexattr` returns success and the attribute is still listed
+  afterwards, on NFS and on local APFS alike. No entitlement opts an app out.
+- **Deleting the `._` file does stick**, and later writes do not bring it back. A rename carries the
+  sidecar with it, so finalization keeps every one; deleting a file deletes its sidecar.
+
+CardVault does not delete them. The sidecar is macOS's record of what wrote the file, kept there on
+purpose; the only destination file CardVault removes is one its manifest records as in progress; and
+by the time a copy is verified the sidecar's create and write have already been paid, so deleting it
+would add a round trip per file and save none.
+
+CardVault itself never trips over them. `FileManager` listings and enumerators omit AppleDouble
+files on a volume that stores them, so conflict classification and recovery never mistake a sidecar
+for unrelated content.
+
+Avoiding them is a property of the share, not of the app. Neither of these has been measured here:
+
+- An SMB share whose server stores named streams (Samba's `vfs_fruit` with `streams_xattr`, common on
+  NAS setups) keeps extended attributes on the server and writes no `._` files.
+- NFSv4 mounted with `namedattr` stores them only if the server supports NFSv4 named attributes,
+  which Linux `nfsd` does not.
+
+Removing them from an archive afterwards, for example with `dot_clean -m`, is the user's call to
+make on their own copy.
+
+## Speed
+
+CardVault does not change mounts. These are settings the user controls, and the first things to
+check when a network backup runs well below the share's sequential rate.
+
+**Mount block size.** macOS mounted the export above with `vers=3,rsize=32768,wsize=32768`, which
+`nfsstat -m` reports. Every 32 KiB of copy or read-back is then a round trip to the server, so on
+Wi-Fi the round-trip time bounds throughput as much as the link rate does. Larger blocks help where
+the server allows them:
+
+```sh
+mount -t nfs -o vers=3,rsize=1048576,wsize=1048576 server:/export /Volumes/share
+```
+
+The server may negotiate the sizes down; `nfsstat -m` shows what the mount actually got. To apply the
+options to every NFS mount, including Connect to Server, set `nfs.client.mount.options` in
+`/etc/nfs.conf` (see `nfs.conf(5)`).
+
+**Wired versus Wi-Fi.** The measurements in `progress-performance.md` were taken over Wi-Fi 6E with a
+3.8 ms round trip. A wired link shortens every one of those round trips, and the per-file work that
+remains after batching — flush, dates, read-back — is made of them.
+
+**Other traffic to the same NAS.** While diagnosing a slow NFS backup, a Time Machine backup over SMB
+to the same NAS was uploading about 27 MB/s over the same Wi-Fi link. It competes for the link and
+for the server's disks. Let it finish or skip it before a large transfer; `tmutil status` shows
+whether one is running.
+
+**Measuring a share.** `ProgressBenchmark/measureNetworkBackup` copies 64 raw-sized files to a local
+primary and a folder on the share, verifies both, and prints the elapsed time and payload rate. Run
+it before and after a change to the mount or the network:
+
+```sh
+CARDVAULT_BENCH_NETWORK_DESTINATION=/Volumes/share/scratch swift test --disable-sandbox -Xswiftc -DCARDVAULT_BENCHMARK --filter ProgressBenchmark/measureNetworkBackup
+```
+
 ## Testing
 
 Pure-function coverage is in `CardVaultTests/VolumeTopologyTests.swift` (`NetworkVolumeOriginTests`,
