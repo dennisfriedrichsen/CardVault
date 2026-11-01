@@ -225,7 +225,18 @@ the change is for; `measureNetworkBackup` now runs both shapes back to back:
 CARDVAULT_BENCH_NETWORK_DESTINATION=/Volumes/share/scratch swift test --disable-sandbox -Xswiftc -DCARDVAULT_BENCHMARK --filter ProgressBenchmark/measureNetworkBackup
 ```
 
-Record its two lines here when it runs against a share.
+Same 64 raw-sized files (384 MiB) to a local primary and a folder on an NFS
+share (`files-fast` on the same ZFS NAS as the table above), two runs each,
+Debug build, the two shapes interleaved within each run:
+
+| Run | Elapsed | Per file | Payload rate |
+| --- | --- | --- | --- |
+| Verification after copy, one destination at a time | 26.6–27.6 s | 0.42–0.43 s | 14.6–15.1 MB/s |
+| Verification alongside copy, local and share together | 18.1–21.8 s | 0.28–0.34 s | 18.4–22.2 MB/s |
+
+That is 21–34 percent less elapsed time on the case the change is for, and the
+row that justifies `overlapVerification` and `separateDeviceConcurrency` as
+defaults.
 
 ## What did not change
 
