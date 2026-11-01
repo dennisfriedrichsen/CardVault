@@ -113,7 +113,8 @@ recovery can reach a months-old transfer's roots after the last-used selections 
 `Docs/` carries the contracts worth reading before changing the matching area:
 `manifest-schema-v1.md`, `transfer-history.md`, `fault-injection-coverage.md`,
 `progress-performance.md`, `network-destinations.md` (what CardVault can and cannot tell about an
-NFS or SMB share, and why same-server warns instead of blocking), and
+NFS or SMB share, why same-server warns instead of blocking, why NFS copies carry `._` sidecars, and
+which mount settings govern speed), and
 `manual-removable-media-test.md` (the opt-in real-card procedure).
 
 `ui-state-audit.md` is the accessibility and layout audit of the principal UI states, with
