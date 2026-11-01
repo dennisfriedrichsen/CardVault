@@ -309,6 +309,18 @@ extension VolumeIdentity {
         return .indeterminate
     }
 
+    /// Whether the two volumes are known to live on different hardware. Stricter than
+    /// `relation(to:) == .distinct`, which two volumes on one disk can satisfy: only Disk
+    /// Arbitration can name the whole device behind a local volume, so a fallback identity
+    /// never proves separation, and two network mounts never do either, since a differing host
+    /// name settles nothing. A network mount and a local volume are on different machines.
+    public func isOnSeparateHardware(from other: VolumeIdentity) -> Bool {
+        if isLocal != other.isLocal { return true }
+        guard isLocal, identitySource == .diskArbitration, other.identitySource == .diskArbitration,
+              let mine = physicalStoreIdentifier, let theirs = other.physicalStoreIdentifier else { return false }
+        return mine != theirs
+    }
+
     private func sharesPhysicalDevice(with other: VolumeIdentity) -> Bool {
         guard identitySource == .diskArbitration, other.identitySource == .diskArbitration,
               let mine = physicalStoreIdentifier, let theirs = other.physicalStoreIdentifier else { return false }

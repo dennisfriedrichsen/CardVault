@@ -110,11 +110,38 @@ struct ProgressTests {
         }
     }
 
-    @Test("Copy progress is fully published before verification progress begins")
-    func phasesStayIndependent() async throws {
+    @Test("Read-back overlaps the copy, and verification never completes before it")
+    func overlappedPhasesStayIndependent() async throws {
         try await withProgressFixture(destinationCount: 2) { plan, _ in
             let recorder = SnapshotRecorder()
             let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(chunkBytes: 4_096))
+                .execute(plan: plan) { await recorder.append($0) }
+
+            let snapshots = await recorder.snapshots
+            let lastCopy = try #require(snapshots.lastIndex { $0.phase == .copying })
+            let firstVerification = try #require(snapshots.firstIndex { $0.phase == .verifying })
+            #expect(firstVerification < lastCopy)
+            #expect(snapshots[lastCopy].isPhaseComplete)
+            // A finished copy is never a finished transfer, and neither is a
+            // read-back that got ahead of it.
+            let earlyVerifications = snapshots[..<lastCopy].filter { $0.phase == .verifying }
+            #expect(!earlyVerifications.contains { $0.isPhaseComplete })
+            let verifications = snapshots.filter { $0.phase == .verifying }
+            #expect(verifications.last?.isPhaseComplete == true)
+            #expect(verifications.last?.completedFiles == plan.files.count)
+            #expect(verifications.last?.totalBytes == plan.totalBytes * 2)
+            let byteCounts = verifications.map(\.completedBytes)
+            #expect(byteCounts == byteCounts.sorted())
+            #expect(outcome.state == .verified)
+        }
+    }
+
+    @Test("Without overlap, copy progress is fully published before verification progress begins")
+    func phasesStayIndependent() async throws {
+        try await withProgressFixture(destinationCount: 2) { plan, _ in
+            let recorder = SnapshotRecorder()
+            let outcome = try await TransferCoordinator(fileSystem: LocalFileSystem(chunkBytes: 4_096),
+                                                        tuning: TransferTuning(overlapVerification: false))
                 .execute(plan: plan) { await recorder.append($0) }
 
             let snapshots = await recorder.snapshots

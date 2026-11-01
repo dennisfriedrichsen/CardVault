@@ -15,8 +15,19 @@ struct ProgressBenchmark {
 
     @Test("Measure sequential and bounded-concurrency verification")
     func measureConcurrency() async throws {
-        try await run(label: "dual-sequential", destinationCount: 2, tuning: TransferTuning(destinationConcurrency: 1))
-        try await run(label: "dual-concurrent", destinationCount: 2, tuning: TransferTuning(destinationConcurrency: 2))
+        try await run(label: "dual-sequential", destinationCount: 2,
+                      tuning: TransferTuning(destinationConcurrency: 1, overlapVerification: false))
+        try await run(label: "dual-concurrent", destinationCount: 2,
+                      tuning: TransferTuning(destinationConcurrency: 2, overlapVerification: false))
+    }
+
+    @Test("Measure verification that overlaps the copy against verification after it")
+    func measureOverlap() async throws {
+        for _ in 0..<3 {
+            try await run(label: "dual-after-copy", destinationCount: 2,
+                          tuning: TransferTuning(overlapVerification: false))
+            try await run(label: "dual-overlapped", destinationCount: 2, tuning: .default)
+        }
     }
 
     /// A local primary plus a backup on a network mount, the shape where per-file
@@ -52,11 +63,25 @@ struct ProgressBenchmark {
                 DestinationPlan(label: "Backup", rootPath: remote.path,
                                 volume: VolumeIdentity(displayName: "share", isLocal: false)),
             ])
-        let start = Date()
-        let outcome = try await TransferCoordinator().execute(plan: plan)
-        let elapsed = Date().timeIntervalSince(start)
-        let megabytes = Double(plan.totalBytes) / 1_000_000
-        print("BENCH network-backup state=\(outcome.state) files=\(files.count) bytes=\(plan.totalBytes) elapsed=\(String(format: "%.1f", elapsed))s payload=\(String(format: "%.1f", megabytes / elapsed))MBps perFile=\(String(format: "%.2f", elapsed / Double(files.count)))s")
+        // Before: every copy read back after the last one is written, one
+        // destination at a time. After: the defaults, which overlap read-back
+        // with the copy and read a local disk and a share back together.
+        let runs: [(String, TransferTuning)] = [
+            ("after-copy", TransferTuning(separateDeviceConcurrency: 1, overlapVerification: false)),
+            ("overlapped", .default),
+        ]
+        for (label, tuning) in runs {
+            for destination in [root.appending(path: "primary"), remote] {
+                for item in try FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil) {
+                    try FileManager.default.removeItem(at: item)
+                }
+            }
+            let start = Date()
+            let outcome = try await TransferCoordinator(tuning: tuning).execute(plan: plan)
+            let elapsed = Date().timeIntervalSince(start)
+            let megabytes = Double(plan.totalBytes) / 1_000_000
+            print("BENCH network-backup-\(label) state=\(outcome.state) files=\(files.count) bytes=\(plan.totalBytes) elapsed=\(String(format: "%.1f", elapsed))s payload=\(String(format: "%.1f", megabytes / elapsed))MBps perFile=\(String(format: "%.2f", elapsed / Double(files.count)))s")
+        }
     }
 
     private func run(label: String, destinationCount: Int, tuning: TransferTuning) async throws {

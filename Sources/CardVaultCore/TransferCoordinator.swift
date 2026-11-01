@@ -68,9 +68,22 @@ public actor TransferCoordinator {
     /// writes the in-memory record, which marks nothing ahead.
     private var networkRecordCovers: [UUID: Int] = [:]
 
-    /// Precise counters live here, on the coordinator. Only throttled snapshots
-    /// ever reach the progress handler, so a fast drive cannot flood the caller.
-    private var aggregator: ProgressAggregator?
+    /// Read-backs that ran alongside the copy phase, by file. They are held
+    /// here rather than recorded as they finish: a conflict pauses the transfer
+    /// before verification, and a paused transfer claims nothing verified. A
+    /// resume reads every copy back again, so a result held here and lost to an
+    /// interruption costs nothing a recorded one would have saved.
+    private var readBackDuringCopy: [Int: [VerificationOutcomeRecord]] = [:]
+
+    /// One reader per destination for the whole run. Verification that overlaps
+    /// the copy must not share the copy's actor, which would serialise the two.
+    private var verificationReaders: [UUID: LocalFileSystem] = [:]
+
+    /// Precise counters live here, on the coordinator, one aggregator per phase:
+    /// copy and verification can be in flight together and never share counters.
+    /// Only throttled snapshots ever reach the progress handler, so a fast drive
+    /// cannot flood the caller.
+    private var aggregators: [TransferProgress.Phase: ProgressAggregator] = [:]
     private var progressHandler: ProgressHandler?
 
     public init(fileSystem: LocalFileSystem = LocalFileSystem(), manifestStore: ManifestStore = ManifestStore(),
@@ -104,7 +117,12 @@ public actor TransferCoordinator {
         progressHandler = progress
         readBackThisRun = []
         networkRecordCovers = [:]
-        defer { progressHandler = nil; aggregator = nil; readBackThisRun = []; networkRecordCovers = [:] }
+        readBackDuringCopy = [:]
+        defer {
+            progressHandler = nil; aggregators = [:]; readBackThisRun = []; networkRecordCovers = [:]
+            readBackDuringCopy = [:]; verificationReaders = [:]
+        }
+        verificationReaders = await makeVerificationReaders(locations: locations)
         manifest.state = .copying
         try await persist(manifest, locations: locations)
 
@@ -118,6 +136,7 @@ public actor TransferCoordinator {
             manifest.state = .copyComplete
             try await persist(manifest, locations: locations)
             manifest.state = .verifying
+            for (index, records) in readBackDuringCopy { apply(records, fileIndex: index, manifest: &manifest) }
             try await persist(manifest, locations: locations)
             try await verify(plan: plan, manifest: &manifest, locations: locations)
             return try await finish(plan: plan, manifest: &manifest, locations: locations)
@@ -269,43 +288,43 @@ public actor TransferCoordinator {
     }
 
     private func beginPhase(_ phase: TransferProgress.Phase, totalFiles: Int, totalBytes: Int64) {
-        aggregator = ProgressAggregator(phase: phase, totalFiles: totalFiles, totalBytes: totalBytes,
-                                        tuning: tuning, startedAt: now())
+        aggregators[phase] = ProgressAggregator(phase: phase, totalFiles: totalFiles, totalBytes: totalBytes,
+                                                tuning: tuning, startedAt: now())
     }
 
     /// Called from the file system for every chunk. Cheap, and never touches the
     /// main actor unless a throttling threshold has been reached.
-    private func recordBytes(_ delta: Int64) async {
-        guard var current = aggregator else { return }
+    private func recordBytes(_ delta: Int64, _ phase: TransferProgress.Phase) async {
+        guard var current = aggregators[phase] else { return }
         let snapshot = current.record(bytes: delta, at: now())
-        aggregator = current
+        aggregators[phase] = current
         if let snapshot { await progressHandler?(snapshot) }
     }
 
-    private func beginFile(_ relativePath: String?) async {
-        guard var current = aggregator else { return }
+    private func beginFile(_ relativePath: String?, _ phase: TransferProgress.Phase) async {
+        guard var current = aggregators[phase] else { return }
         let snapshot = current.beginFile(relativePath, at: now())
-        aggregator = current
+        aggregators[phase] = current
         if let snapshot { await progressHandler?(snapshot) }
     }
 
-    private func completeFile() async {
-        guard var current = aggregator else { return }
+    private func completeFile(_ phase: TransferProgress.Phase) async {
+        guard var current = aggregators[phase] else { return }
         let snapshot = current.completeFile(at: now())
-        aggregator = current
+        aggregators[phase] = current
         if let snapshot { await progressHandler?(snapshot) }
     }
 
     /// Publishes the final state of a phase unconditionally.
-    private func flushPhase(currentRelativePath: String?? = nil) async {
-        guard var current = aggregator else { return }
+    private func flushPhase(_ phase: TransferProgress.Phase, currentRelativePath: String?? = nil) async {
+        guard var current = aggregators[phase] else { return }
         let snapshot = current.flush(at: now(), currentRelativePath: currentRelativePath)
-        aggregator = current
+        aggregators[phase] = current
         await progressHandler?(snapshot)
     }
 
-    private var byteHandler: LocalFileSystem.ByteHandler {
-        { [weak self] delta in await self?.recordBytes(delta) }
+    private func byteHandler(_ phase: TransferProgress.Phase) -> LocalFileSystem.ByteHandler {
+        { [weak self] delta in await self?.recordBytes(delta, phase) }
     }
 
     /// One wording for every site that refuses a path, so the record reads the
@@ -322,7 +341,12 @@ public actor TransferCoordinator {
         // One source hash pass plus one write pass per destination.
         beginPhase(.copying, totalFiles: manifest.files.count,
                    totalBytes: workBytes(plan, passes: 1 + locations.count))
-        let onBytes = byteHandler
+        let overlapping = tuning.overlapVerification
+        if overlapping {
+            beginPhase(.verifying, totalFiles: manifest.files.count,
+                       totalBytes: workBytes(plan, passes: locations.count))
+        }
+        let onBytes = byteHandler(.copying)
         var indexes: [UUID: CompatibleManifestIndex] = [:]
         for location in locations {
             indexes[location.destination.id] = await CompatibleManifestIndex.load(
@@ -331,115 +355,137 @@ public actor TransferCoordinator {
                 excluding: manifest.transferID, store: manifestStore)
         }
         var conflicts: [DestinationConflict] = []
-        for index in manifest.files.indices {
-            try Task.checkCancellation()
-            let file = manifest.files[index]
-            await beginFile(file.relativeSourcePath)
-            let source = URL(filePath: plan.sourceRootPath).appending(path: file.relativeSourcePath)
-            let sourceSize = try await fileSystem.fileSize(source)
-            guard sourceSize == file.byteCount else { throw FileSystemError.sourceChanged(file.relativeSourcePath) }
-            manifest.files[index].sourceChecksum = try await fileSystem.checksum(source, expectedSize: file.byteCount,
-                                                                                onBytes: onBytes)
-            var pending: [(location: Location, url: URL)] = []
-            for location in locations {
-                let result = manifest.files[index].destinations[location.destination.id]
-                guard result?.copyState != .copied && result?.verification != .verified else {
-                    // A file an earlier run copied still needs its dates, or the
-                    // archive ends up recording which run copied each file.
-                    if result?.timestamps?.needsApplication ?? true {
-                        await applyTimestamps(&manifest, fileIndex: index, location: location)
-                        try await persist(manifest, locations: locations)
-                    }
-                    // Resumed work still counts toward the phase so the bar stays honest.
-                    await recordBytes(file.byteCount)
-                    continue
-                }
-                guard let destination = TransferLayout.containedURL(
-                    relativePath: file.relativeDestinationPath, under: location.originalsRoot) else {
-                    // Nothing outside this transfer's own tree is ever removed or
-                    // written, whatever the record says. Recorded as a failure so
-                    // the destination cannot be reported verified.
-                    manifest.files[index].destinations[location.destination.id]?.copyState = .failed
-                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
-                    manifest.files[index].destinations[location.destination.id]?.error =
-                        Self.escapingPathError(file.relativeDestinationPath)
-                    try await persist(manifest, locations: locations)
-                    await recordBytes(file.byteCount)
-                    continue
-                }
-                if await fileSystem.exists(destination) {
-                    let evidence = ConflictEvidence(
-                        relativePath: file.relativeDestinationPath,
-                        expectedByteCount: file.byteCount,
-                        sourceChecksum: manifest.files[index].sourceChecksum,
-                        currentResult: result,
-                        compatibleRecord: indexes[location.destination.id]?[file.relativeDestinationPath])
-                    let assessment = await classifier.assess(existingFileAt: destination, evidence: evidence,
-                                                             fileSystem: fileSystem)
-                    manifest.files[index].destinations[location.destination.id]?.conflict = assessment.classification
-                    if assessment.classification.isSatisfied {
-                        // Skipped only because the bytes on disk were hashed and
-                        // matched the source. A matching name and size alone
-                        // never reaches this branch.
-                        manifest.files[index].destinations[location.destination.id]?.copyState = .skipped
-                        manifest.files[index].destinations[location.destination.id]?.destinationChecksum =
-                            assessment.existingChecksum
-                        manifest.files[index].destinations[location.destination.id]?.verification = .verified
-                        manifest.files[index].destinations[location.destination.id]?.error = nil
-                        // The digest came from this run's own read of the bytes
-                        // on disk, so verification has nothing left to confirm.
-                        readBackThisRun.insert(ReadBack(fileIndex: index, destinationID: location.destination.id))
-                        // A satisfied file is part of this archive, so it carries
-                        // the same dates as everything copied beside it.
-                        await applyTimestamps(&manifest, fileIndex: index, location: location)
-                        try await persist(manifest, locations: locations)
-                        await recordBytes(file.byteCount)
+        var inFlight: InFlightVerification?
+        do {
+            for index in manifest.files.indices {
+                try Task.checkCancellation()
+                let file = manifest.files[index]
+                await beginFile(file.relativeSourcePath, .copying)
+                let source = URL(filePath: plan.sourceRootPath).appending(path: file.relativeSourcePath)
+                let sourceSize = try await fileSystem.fileSize(source)
+                guard sourceSize == file.byteCount else { throw FileSystemError.sourceChanged(file.relativeSourcePath) }
+                manifest.files[index].sourceChecksum = try await fileSystem.checksum(source, expectedSize: file.byteCount,
+                                                                                    onBytes: onBytes)
+                var pending: [(location: Location, url: URL)] = []
+                for location in locations {
+                    let result = manifest.files[index].destinations[location.destination.id]
+                    guard result?.copyState != .copied && result?.verification != .verified else {
+                        // A file an earlier run copied still needs its dates, or the
+                        // archive ends up recording which run copied each file.
+                        if result?.timestamps?.needsApplication ?? true {
+                            await applyTimestamps(&manifest, fileIndex: index, location: location)
+                            try await persist(manifest, locations: locations)
+                        }
+                        // Resumed work still counts toward the phase so the bar stays honest.
+                        await recordBytes(file.byteCount, .copying)
                         continue
                     }
-                    if assessment.classification.isReplaceable {
-                        try await fileSystem.removeIncompleteFile(destination)
-                    } else {
-                        // Never overwritten, never renamed around.
-                        manifest.files[index].destinations[location.destination.id]?.copyState = .conflicted
-                        manifest.files[index].destinations[location.destination.id]?.verification = .pending
-                        manifest.files[index].destinations[location.destination.id]?.error = assessment.explanation
-                        conflicts.append(DestinationConflict(
-                            destinationID: location.destination.id,
-                            destinationLabel: location.destination.label,
-                            relativePath: file.relativeDestinationPath,
-                            classification: assessment.classification,
-                            existingByteCount: assessment.existingByteCount,
-                            explanation: assessment.explanation))
-                        try await persist(manifest, locations: locations)
-                        await recordBytes(file.byteCount)
-                        continue
-                    }
-                }
-                manifest.files[index].destinations[location.destination.id]?.copyState = .copying
-                pending.append((location, destination))
-            }
-            if !pending.isEmpty {
-                // Every copy about to start is recorded as in progress before its
-                // first byte lands, so recovery may remove any of them.
-                try await checkpoint(manifest, fileIndex: index, locations: locations, .beforeCopy)
-                let failures = try await fileSystem.copyExclusive(
-                    from: source, to: pending.map(\.url), expectedSize: file.byteCount,
-                    expectedChecksum: manifest.files[index].sourceChecksum, onBytes: onBytes)
-                for ((location, _), failure) in zip(pending, failures) {
-                    if let failure {
+                    guard let destination = TransferLayout.containedURL(
+                        relativePath: file.relativeDestinationPath, under: location.originalsRoot) else {
+                        // Nothing outside this transfer's own tree is ever removed or
+                        // written, whatever the record says. Recorded as a failure so
+                        // the destination cannot be reported verified.
                         manifest.files[index].destinations[location.destination.id]?.copyState = .failed
-                        manifest.files[index].destinations[location.destination.id]?.error = failure
-                    } else {
-                        manifest.files[index].destinations[location.destination.id]?.copyState = .copied
-                        await applyTimestamps(&manifest, fileIndex: index, location: location)
+                        manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                        manifest.files[index].destinations[location.destination.id]?.error =
+                            Self.escapingPathError(file.relativeDestinationPath)
+                        try await persist(manifest, locations: locations)
+                        await recordBytes(file.byteCount, .copying)
+                        continue
+                    }
+                    if await fileSystem.exists(destination) {
+                        let evidence = ConflictEvidence(
+                            relativePath: file.relativeDestinationPath,
+                            expectedByteCount: file.byteCount,
+                            sourceChecksum: manifest.files[index].sourceChecksum,
+                            currentResult: result,
+                            compatibleRecord: indexes[location.destination.id]?[file.relativeDestinationPath])
+                        let assessment = await classifier.assess(existingFileAt: destination, evidence: evidence,
+                                                                 fileSystem: fileSystem)
+                        manifest.files[index].destinations[location.destination.id]?.conflict = assessment.classification
+                        if assessment.classification.isSatisfied {
+                            // Skipped only because the bytes on disk were hashed and
+                            // matched the source. A matching name and size alone
+                            // never reaches this branch.
+                            manifest.files[index].destinations[location.destination.id]?.copyState = .skipped
+                            manifest.files[index].destinations[location.destination.id]?.destinationChecksum =
+                                assessment.existingChecksum
+                            manifest.files[index].destinations[location.destination.id]?.verification = .verified
+                            manifest.files[index].destinations[location.destination.id]?.error = nil
+                            // The digest came from this run's own read of the bytes
+                            // on disk, so verification has nothing left to confirm.
+                            readBackThisRun.insert(ReadBack(fileIndex: index, destinationID: location.destination.id))
+                            // A satisfied file is part of this archive, so it carries
+                            // the same dates as everything copied beside it.
+                            await applyTimestamps(&manifest, fileIndex: index, location: location)
+                            try await persist(manifest, locations: locations)
+                            await recordBytes(file.byteCount, .copying)
+                            continue
+                        }
+                        if assessment.classification.isReplaceable {
+                            try await fileSystem.removeIncompleteFile(destination)
+                        } else {
+                            // Never overwritten, never renamed around.
+                            manifest.files[index].destinations[location.destination.id]?.copyState = .conflicted
+                            manifest.files[index].destinations[location.destination.id]?.verification = .pending
+                            manifest.files[index].destinations[location.destination.id]?.error = assessment.explanation
+                            conflicts.append(DestinationConflict(
+                                destinationID: location.destination.id,
+                                destinationLabel: location.destination.label,
+                                relativePath: file.relativeDestinationPath,
+                                classification: assessment.classification,
+                                existingByteCount: assessment.existingByteCount,
+                                explanation: assessment.explanation))
+                            try await persist(manifest, locations: locations)
+                            await recordBytes(file.byteCount, .copying)
+                            continue
+                        }
+                    }
+                    manifest.files[index].destinations[location.destination.id]?.copyState = .copying
+                    pending.append((location, destination))
+                }
+                if !pending.isEmpty {
+                    // Every copy about to start is recorded as in progress before its
+                    // first byte lands, so recovery may remove any of them.
+                    try await checkpoint(manifest, fileIndex: index, locations: locations, .beforeCopy)
+                    let failures = try await fileSystem.copyExclusive(
+                        from: source, to: pending.map(\.url), expectedSize: file.byteCount,
+                        expectedChecksum: manifest.files[index].sourceChecksum, onBytes: onBytes)
+                    for ((location, _), failure) in zip(pending, failures) {
+                        if let failure {
+                            manifest.files[index].destinations[location.destination.id]?.copyState = .failed
+                            manifest.files[index].destinations[location.destination.id]?.error = failure
+                        } else {
+                            manifest.files[index].destinations[location.destination.id]?.copyState = .copied
+                            await applyTimestamps(&manifest, fileIndex: index, location: location)
+                        }
+                    }
+                    try await checkpoint(manifest, fileIndex: index, locations: locations, .afterCopy)
+                }
+                await completeFile(.copying)
+                // The read-back of this file runs while the next one copies, so the
+                // card and each destination are not left idle in turn. A conflict
+                // pauses the transfer before verification, so once there is one no
+                // further read-back starts.
+                if overlapping {
+                    try await settle(&inFlight)
+                    if conflicts.isEmpty {
+                        inFlight = await startVerification(fileIndex: index, manifest: &manifest, locations: locations)
                     }
                 }
-                try await checkpoint(manifest, fileIndex: index, locations: locations, .afterCopy)
             }
-            await completeFile()
+            try await settle(&inFlight)
+        } catch {
+            // A read-back still in flight is stopped and dropped: nothing read
+            // back alongside a copy that failed is recorded.
+            if let inFlight {
+                inFlight.task.cancel()
+                _ = await inFlight.task.value
+            }
+            throw error
         }
         // A complete copy phase is not a successful transfer; verification follows.
-        await flushPhase(currentRelativePath: .some(nil))
+        await flushPhase(.copying, currentRelativePath: .some(nil))
         return conflicts
     }
 
@@ -521,64 +567,135 @@ public actor TransferCoordinator {
         let error: String?
     }
 
+    private struct InFlightVerification {
+        let fileIndex: Int
+        let task: Task<[VerificationOutcomeRecord], Never>
+    }
+
+    private func startVerification(fileIndex: Int, manifest: inout TransferManifest,
+                                   locations: [Location]) async -> InFlightVerification {
+        await beginFile(manifest.files[fileIndex].relativeSourcePath, .verifying)
+        let jobs = await verificationJobs(fileIndex: fileIndex, manifest: &manifest, locations: locations)
+        let expectedSize = manifest.files[fileIndex].byteCount
+        let limit = verificationConcurrency(locations: locations)
+        let readers = verificationReaders
+        let fallback = fileSystem
+        let onBytes = byteHandler(.verifying)
+        let task = Task {
+            await Self.checksums(for: jobs, expectedSize: expectedSize, limit: limit,
+                                 readers: readers, fallback: fallback, onBytes: onBytes)
+        }
+        return InFlightVerification(fileIndex: fileIndex, task: task)
+    }
+
+    private func settle(_ inFlight: inout InFlightVerification?) async throws {
+        guard let current = inFlight else { return }
+        let records = await withTaskCancellationHandler {
+            await current.task.value
+        } onCancel: {
+            current.task.cancel()
+        }
+        inFlight = nil
+        // A read cut short by cancellation reports an error, not a mismatch,
+        // and must not be kept as either.
+        try Task.checkCancellation()
+        readBackDuringCopy[current.fileIndex] = records
+        await completeFile(.verifying)
+    }
+
     private func verify(plan: TransferPlan, manifest: inout TransferManifest, locations: [Location]) async throws {
-        beginPhase(.verifying, totalFiles: manifest.files.count,
-                   totalBytes: workBytes(plan, passes: locations.count))
-        let readers = try await makeVerificationReaders(locations: locations)
-        for index in manifest.files.indices {
+        // Continues the phase the copy already began when the two overlapped, so
+        // the bar does not restart at zero.
+        if aggregators[.verifying] == nil {
+            beginPhase(.verifying, totalFiles: manifest.files.count,
+                       totalBytes: workBytes(plan, passes: locations.count))
+        }
+        let limit = verificationConcurrency(locations: locations)
+        for index in manifest.files.indices where readBackDuringCopy[index] == nil {
             try Task.checkCancellation()
             let file = manifest.files[index]
-            await beginFile(file.relativeSourcePath)
-            var jobs: [VerificationJob] = []
-            for location in locations {
-                // `.copied` and `.skipped` both mean bytes CardVault stands
-                // behind are supposed to be at this path, and both are read
-                // back here. A `.skipped` file recorded by an earlier run is
-                // the one case where a verified claim would otherwise rest on
-                // a read this process never performed — however long ago that
-                // run was, and whatever happened to the file since.
-                let copyState = manifest.files[index].destinations[location.destination.id]?.copyState
-                let alreadyReadBack = readBackThisRun.contains(
-                    ReadBack(fileIndex: index, destinationID: location.destination.id))
-                guard copyState == .copied || (copyState == .skipped && !alreadyReadBack) else {
-                    await recordBytes(file.byteCount)
-                    continue
-                }
-                guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
-                                                            under: location.originalsRoot) else {
-                    manifest.files[index].destinations[location.destination.id]?.verification = .failed
-                    manifest.files[index].destinations[location.destination.id]?.error =
-                        Self.escapingPathError(file.relativeDestinationPath)
-                    await recordBytes(file.byteCount)
-                    continue
-                }
-                jobs.append(.init(destinationID: location.destination.id, url: url))
-            }
-            let records = try await checksums(for: jobs, expectedSize: file.byteCount, readers: readers)
-            for record in records {
-                if let checksum = record.checksum {
-                    manifest.files[index].destinations[record.destinationID]?.destinationChecksum = checksum
-                    manifest.files[index].destinations[record.destinationID]?.verification =
-                        checksum == file.sourceChecksum ? .verified : .mismatch
-                } else {
-                    manifest.files[index].destinations[record.destinationID]?.verification = .failed
-                    manifest.files[index].destinations[record.destinationID]?.error = record.error
-                }
-            }
+            await beginFile(file.relativeSourcePath, .verifying)
+            let jobs = await verificationJobs(fileIndex: index, manifest: &manifest, locations: locations)
+            let records = await Self.checksums(for: jobs, expectedSize: file.byteCount, limit: limit,
+                                               readers: verificationReaders, fallback: fileSystem,
+                                               onBytes: byteHandler(.verifying))
+            apply(records, fileIndex: index, manifest: &manifest)
             // One record per file: a result lost to an interruption here is only
             // a copy read back again on resume, never a claim made without a read.
             if !records.isEmpty {
                 try await checkpoint(manifest, fileIndex: index, locations: locations, .afterVerification)
             }
-            await completeFile()
+            await completeFile(.verifying)
         }
-        await flushPhase(currentRelativePath: .some(nil))
+        await flushPhase(.verifying, currentRelativePath: .some(nil))
     }
 
-    /// One file system actor per destination when bounded concurrency is enabled;
-    /// a single shared actor would serialise the reads it is meant to overlap.
-    private func makeVerificationReaders(locations: [Location]) async throws -> [UUID: LocalFileSystem] {
-        guard tuning.destinationConcurrency > 1, locations.count > 1 else {
+    private func verificationJobs(fileIndex index: Int, manifest: inout TransferManifest,
+                                  locations: [Location]) async -> [VerificationJob] {
+        let file = manifest.files[index]
+        var jobs: [VerificationJob] = []
+        for location in locations {
+            // `.copied` and `.skipped` both mean bytes CardVault stands
+            // behind are supposed to be at this path, and both are read
+            // back here. A `.skipped` file recorded by an earlier run is
+            // the one case where a verified claim would otherwise rest on
+            // a read this process never performed — however long ago that
+            // run was, and whatever happened to the file since.
+            let copyState = manifest.files[index].destinations[location.destination.id]?.copyState
+            let alreadyReadBack = readBackThisRun.contains(
+                ReadBack(fileIndex: index, destinationID: location.destination.id))
+            guard copyState == .copied || (copyState == .skipped && !alreadyReadBack) else {
+                await recordBytes(file.byteCount, .verifying)
+                continue
+            }
+            guard let url = TransferLayout.containedURL(relativePath: file.relativeDestinationPath,
+                                                        under: location.originalsRoot) else {
+                manifest.files[index].destinations[location.destination.id]?.verification = .failed
+                manifest.files[index].destinations[location.destination.id]?.error =
+                    Self.escapingPathError(file.relativeDestinationPath)
+                await recordBytes(file.byteCount, .verifying)
+                continue
+            }
+            jobs.append(.init(destinationID: location.destination.id, url: url))
+        }
+        return jobs
+    }
+
+    private func apply(_ records: [VerificationOutcomeRecord], fileIndex index: Int,
+                       manifest: inout TransferManifest) {
+        let sourceChecksum = manifest.files[index].sourceChecksum
+        for record in records {
+            if let checksum = record.checksum {
+                manifest.files[index].destinations[record.destinationID]?.destinationChecksum = checksum
+                manifest.files[index].destinations[record.destinationID]?.verification =
+                    checksum == sourceChecksum ? .verified : .mismatch
+            } else {
+                manifest.files[index].destinations[record.destinationID]?.verification = .failed
+                manifest.files[index].destinations[record.destinationID]?.error = record.error
+            }
+        }
+    }
+
+    /// Reads on one device compete for the same hardware, which is the shape
+    /// most likely to hurt removable media. Reads on two separate devices do
+    /// not, so destinations that are provably apart are read back together.
+    private func verificationConcurrency(locations: [Location]) -> Int {
+        let volumes = locations.map(\.destination.volume)
+        let apart = volumes.indices.allSatisfy { first in
+            volumes.indices.allSatisfy { second in
+                first == second || volumes[first].isOnSeparateHardware(from: volumes[second])
+            }
+        }
+        guard apart, volumes.count > 1 else { return tuning.destinationConcurrency }
+        return max(tuning.destinationConcurrency, tuning.separateDeviceConcurrency)
+    }
+
+    /// One file system actor per destination when reads overlap each other or
+    /// the copy; a single shared actor would serialise the reads it is meant to
+    /// overlap.
+    private func makeVerificationReaders(locations: [Location]) async -> [UUID: LocalFileSystem] {
+        guard tuning.overlapVerification || (verificationConcurrency(locations: locations) > 1 && locations.count > 1)
+        else {
             return locations.reduce(into: [:]) { $0[$1.destination.id] = fileSystem }
         }
         var readers: [UUID: LocalFileSystem] = [:]
@@ -586,30 +703,30 @@ public actor TransferCoordinator {
         return readers
     }
 
-    private func checksums(for jobs: [VerificationJob], expectedSize: Int64,
-                           readers: [UUID: LocalFileSystem]) async throws -> [VerificationOutcomeRecord] {
+    private static func checksums(for jobs: [VerificationJob], expectedSize: Int64, limit: Int,
+                                  readers: [UUID: LocalFileSystem], fallback: LocalFileSystem,
+                                  onBytes: @escaping LocalFileSystem.ByteHandler) async -> [VerificationOutcomeRecord] {
         guard !jobs.isEmpty else { return [] }
-        let limit = min(tuning.destinationConcurrency, jobs.count)
-        let onBytes = byteHandler
+        let limit = min(limit, jobs.count)
         guard limit > 1 else {
             var records: [VerificationOutcomeRecord] = []
             for job in jobs {
                 records.append(await checksum(job: job, expectedSize: expectedSize,
-                                              reader: readers[job.destinationID] ?? fileSystem, onBytes: onBytes))
+                                              reader: readers[job.destinationID] ?? fallback, onBytes: onBytes))
             }
             return records
         }
         var records: [VerificationOutcomeRecord] = []
-        try await withThrowingTaskGroup(of: VerificationOutcomeRecord.self) { group in
+        await withTaskGroup(of: VerificationOutcomeRecord.self) { group in
             var next = jobs.startIndex
             func addTask() {
                 let job = jobs[next]
                 next = jobs.index(after: next)
-                let reader = readers[job.destinationID] ?? fileSystem
-                group.addTask { await Self.checksum(job: job, expectedSize: expectedSize, reader: reader, onBytes: onBytes) }
+                let reader = readers[job.destinationID] ?? fallback
+                group.addTask { await checksum(job: job, expectedSize: expectedSize, reader: reader, onBytes: onBytes) }
             }
             for _ in 0..<limit { addTask() }
-            while let record = try await group.next() {
+            while let record = await group.next() {
                 records.append(record)
                 if next < jobs.endIndex { addTask() }
             }
@@ -617,11 +734,6 @@ public actor TransferCoordinator {
         // Deterministic manifest writes regardless of completion order.
         let order = jobs.map(\.destinationID)
         return records.sorted { (order.firstIndex(of: $0.destinationID) ?? 0) < (order.firstIndex(of: $1.destinationID) ?? 0) }
-    }
-
-    private func checksum(job: VerificationJob, expectedSize: Int64, reader: LocalFileSystem,
-                          onBytes: @escaping LocalFileSystem.ByteHandler) async -> VerificationOutcomeRecord {
-        await Self.checksum(job: job, expectedSize: expectedSize, reader: reader, onBytes: onBytes)
     }
 
     private static func checksum(job: VerificationJob, expectedSize: Int64, reader: LocalFileSystem,
@@ -657,8 +769,8 @@ public actor TransferCoordinator {
         if outcomeState == .verified { manifest.verifiedAt = now() }
         try await persist(manifest, locations: locations)
         beginPhase(.finalizing, totalFiles: manifest.files.count, totalBytes: workBytes(plan, passes: 1))
-        await recordBytes(plan.totalBytes)
-        await flushPhase(currentRelativePath: .some(nil))
+        await recordBytes(plan.totalBytes, .finalizing)
+        await flushPhase(.finalizing, currentRelativePath: .some(nil))
         var outcomes: [DestinationOutcome] = []
         var finalized: [Location] = []
         for (location, verified, failed) in destinationResults {

@@ -20,6 +20,15 @@ public struct TransferTuning: Sendable, Equatable {
     /// Upper bound on destinations verified at the same time. `1` keeps the
     /// strictly sequential V1 behaviour.
     public var destinationConcurrency: Int
+    /// The bound used instead when every destination is provably on its own
+    /// hardware, such as a local disk and a network share. Overlapping reads
+    /// there do not compete for one device, which is the case concurrency was
+    /// held back for.
+    public var separateDeviceConcurrency: Int
+    /// Reads file N back from its destinations while file N+1 is copied, rather
+    /// than reading every copy back after the last one is written. Each copy is
+    /// still verified by its own read; only when that read happens changes.
+    public var overlapVerification: Bool
     /// Most files a network destination's manifest may fall behind by. Every
     /// manifest save on a network mount is a run of synchronous round trips to
     /// the server, so a network record is written once per batch of files
@@ -35,6 +44,8 @@ public struct TransferTuning: Sendable, Equatable {
                 rateSampleInterval: TimeInterval = 0.1,
                 chunkBytes: Int = 1_048_576,
                 destinationConcurrency: Int = 1,
+                separateDeviceConcurrency: Int = 2,
+                overlapVerification: Bool = true,
                 networkManifestBatchFiles: Int = 16,
                 networkManifestBatchBytes: Int64 = 512 * 1_048_576) {
         self.progressInterval = progressInterval
@@ -42,6 +53,8 @@ public struct TransferTuning: Sendable, Equatable {
         self.rateSampleInterval = rateSampleInterval
         self.chunkBytes = chunkBytes
         self.destinationConcurrency = max(1, destinationConcurrency)
+        self.separateDeviceConcurrency = max(1, separateDeviceConcurrency)
+        self.overlapVerification = overlapVerification
         self.networkManifestBatchFiles = max(1, networkManifestBatchFiles)
         self.networkManifestBatchBytes = max(1, networkManifestBatchBytes)
     }

@@ -76,6 +76,33 @@ struct VolumeTopologyTests {
         #expect(one.relation(to: two) == .sameDevice)
     }
 
+    @Test("Only Disk Arbitration, or a network mount beside a local disk, proves separate hardware")
+    func separateHardware() {
+        let disk4 = VolumeIdentity(volumeUUID: UUID(), displayName: "A", physicalStoreIdentifier: "disk4",
+                                   identitySource: .diskArbitration)
+        let disk6 = VolumeIdentity(volumeUUID: UUID(), displayName: "B", physicalStoreIdentifier: "disk6",
+                                   identitySource: .diskArbitration)
+        let disk4Again = VolumeIdentity(volumeUUID: UUID(), displayName: "C", physicalStoreIdentifier: "disk4",
+                                        identitySource: .diskArbitration)
+        // Two fallback identities with different UUIDs are distinct volumes,
+        // possibly partitions of one disk.
+        let fallbackOne = VolumeIdentity(volumeUUID: UUID(), displayName: "D", identitySource: .urlResourceValues)
+        let fallbackTwo = VolumeIdentity(volumeUUID: UUID(), displayName: "E", identitySource: .urlResourceValues)
+        let share = VolumeIdentity(displayName: "share", isLocal: false,
+                                   networkOrigin: NetworkVolumeOrigin(host: "nas.local", exportPath: "/a", fileSystemType: "nfs"))
+        let otherShare = VolumeIdentity(displayName: "other", isLocal: false,
+                                        networkOrigin: NetworkVolumeOrigin(host: "other.local", exportPath: "/b", fileSystemType: "nfs"))
+
+        #expect(disk4.isOnSeparateHardware(from: disk6))
+        #expect(!disk4.isOnSeparateHardware(from: disk4Again))
+        #expect(fallbackOne.relation(to: fallbackTwo) == .distinct)
+        #expect(!fallbackOne.isOnSeparateHardware(from: fallbackTwo))
+        #expect(!disk4.isOnSeparateHardware(from: fallbackOne))
+        #expect(fallbackOne.isOnSeparateHardware(from: share))
+        #expect(share.isOnSeparateHardware(from: disk4))
+        #expect(!share.isOnSeparateHardware(from: otherShare))
+    }
+
     @Test("The same volume at a new mount path is still the same volume")
     func remountedVolume() {
         let uuid = UUID()

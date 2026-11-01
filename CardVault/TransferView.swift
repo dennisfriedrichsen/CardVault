@@ -544,8 +544,10 @@ private struct DestinationsPanel: View {
         if model.status == .cancelled { return ("Stopped", "stop.circle", .secondary) }
         if model.showsStopControl {
             if model.isFinalizing { return ("Finalizing…", "hourglass", StatusTone.inProgress.color) }
-            if model.verificationProgress != nil { return ("Verifying…", "checkmark.shield", StatusTone.inProgress.color) }
-            return ("Copying…", "doc.on.doc", StatusTone.inProgress.color)
+            if model.copyProgress?.isPhaseComplete == false || model.verificationProgress == nil {
+                return ("Copying…", "doc.on.doc", StatusTone.inProgress.color)
+            }
+            return ("Verifying…", "checkmark.shield", StatusTone.inProgress.color)
         }
         let label = role == .primary ? "Primary" : "Backup"
         if let preflight = model.preflight?.destinations.first(where: { $0.label == label }) {
@@ -611,15 +613,17 @@ private struct ProgressPanel: View {
         if isStopped { return "Stopped. Verified files are kept and the source was not changed." }
         if model.isFinalizing && model.outcome == nil { return "Finalizing verified transfer…" }
         if model.outcome != nil { return nil }
+        // Verification overlaps the copy, so a copy still running names what
+        // is being copied; the file being read back is a step behind it.
+        if let copy = model.copyProgress, !copy.isPhaseComplete {
+            return copy.currentRelativePath.map { "Copying \($0)" }
+        }
         if let verification = model.verificationProgress, !verification.isPhaseComplete {
             return verification.currentRelativePath.map { "Verifying \($0)" }
                 ?? "Copy complete — verification still in progress"
         }
         // Never present a finished copy as a finished transfer.
-        if let copy = model.copyProgress {
-            if copy.isPhaseComplete { return "Copy complete — verification still in progress" }
-            return copy.currentRelativePath.map { "Copying \($0)" }
-        }
+        if model.copyProgress?.isPhaseComplete == true { return "Copy complete — verification still in progress" }
         return nil
     }
 
@@ -627,7 +631,9 @@ private struct ProgressPanel: View {
     /// running phase has any; a stopped or finished one is a record, not a forecast.
     private var estimates: String? {
         guard !isStopped, model.outcome == nil, model.showsStopControl else { return nil }
-        let running = [model.verificationProgress, model.copyProgress]
+        // The copy sets the pace while it runs; the overlapped read-back only
+        // forecasts its own share of the work.
+        let running = [model.copyProgress, model.verificationProgress]
             .compactMap { $0 }.first { !$0.isPhaseComplete }
         guard let running else { return nil }
         let parts = [rateText(running), remainingText(running)].compactMap { $0 }
