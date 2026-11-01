@@ -136,6 +136,30 @@ struct FaultInjectionTests {
         }
     }
 
+    @Test("A copy that fails after earlier files were read back records none of those read-backs")
+    func sourceDisconnectsAfterOverlappedReadBack() async throws {
+        try await withFaultFixture { fixture in
+            let before = try await fixture.sourceSnapshot()
+            // Two reads per file: the first two files copy, and the first one's
+            // read-back has finished, before the third file's hash fails.
+            let injector = FaultInjector(rules: [
+                .init(.read, pathContains: "/CARD/", after: 4, effect: .fail(.disconnected), repeats: true)
+            ])
+
+            await #expect(throws: (any Error).self) {
+                try await fixture.coordinator(injector: injector).execute(plan: fixture.plan)
+            }
+
+            let manifest = try await fixture.manifest()
+            #expect(manifest.state == .interrupted)
+            #expect(fixture.noFileIsVerified(manifest))
+            let resumed = try await fixture.coordinator().resume(plan: fixture.plan,
+                                                                 manifestURL: fixture.manifestURL())
+            #expect(resumed.state == .verified)
+            try await fixture.expectSourceUnchanged(before)
+        }
+    }
+
     @Test("A destination that disconnects mid-copy fails every file without touching the source")
     func destinationDisconnectsWhileCopying() async throws {
         try await withFaultFixture { fixture in
@@ -717,7 +741,8 @@ struct FaultInjectionTests {
                 return nil
             }
 
-            let outcome = try await fixture.coordinator(manifestStore: store).execute(plan: fixture.plan)
+            let outcome = try await fixture.coordinator(manifestStore: store, overlapVerification: false)
+                .execute(plan: fixture.plan)
 
             #expect(outcome.state == .verified)
             let files = fixture.fileNames.count
@@ -726,6 +751,30 @@ struct FaultInjectionTests {
             #expect(await copying.count == (1 + 2 * files) * locations)
             // Verifying: the phase start, then one record per file.
             #expect(await verifying.count == (1 + files) * locations)
+        }
+    }
+
+    @Test("Read-backs that overlap the copy are recorded with the verification phase's first save")
+    func manifestSavesPerFileOverlapped() async throws {
+        try await withFaultFixture(destinationCount: 2) { fixture in
+            let copying = Tally()
+            let verifying = Tally()
+            let store = ManifestStore { manifest, _ in
+                if manifest.state == .copying { await copying.add() }
+                if manifest.state == .verifying { await verifying.add() }
+                return nil
+            }
+
+            let outcome = try await fixture.coordinator(manifestStore: store).execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            let files = fixture.fileNames.count
+            let locations = fixture.destinationRoots.count
+            // Copying is unchanged: nothing read back is recorded while it runs.
+            #expect(await copying.count == (1 + 2 * files) * locations)
+            // Every file was read back alongside the copy, so the phase start
+            // carries all of them and no per-file save follows.
+            #expect(await verifying.count == locations)
         }
     }
 
@@ -743,14 +792,36 @@ struct FaultInjectionTests {
                 return nil
             }
 
-            let outcome = try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+            let sequential = try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2,
+                                                           overlapVerification: false)
                 .execute(plan: fixture.plan)
 
-            #expect(outcome.state == .verified)
+            #expect(sequential.state == .verified)
             // Three files in batches of two: batches start at the first and third.
             // Copying and verifying each add their phase-start save.
             #expect(await local.count == (1 + 2 * 3) + (1 + 3))
             #expect(await remote.count == (1 + 2) + (1 + 2))
+        }
+    }
+
+    @Test("Overlapped read-backs add no network saves beyond the verification phase's start")
+    func networkManifestSavesPerBatchOverlapped() async throws {
+        try await withFaultFixture(destinationCount: 2, networkDestinations: [1]) { fixture in
+            let network = fixture.destinationRoots[1].lastPathComponent
+            let local = Tally()
+            let remote = Tally()
+            let store = ManifestStore { manifest, url in
+                guard manifest.state == .copying || manifest.state == .verifying else { return nil }
+                if url.path.contains("/\(network)/") { await remote.add() } else { await local.add() }
+                return nil
+            }
+
+            let outcome = try await fixture.coordinator(manifestStore: store, networkManifestBatchFiles: 2)
+                .execute(plan: fixture.plan)
+
+            #expect(outcome.state == .verified)
+            #expect(await local.count == (1 + 2 * 3) + 1)
+            #expect(await remote.count == (1 + 2) + 1)
         }
     }
 
@@ -957,12 +1028,14 @@ private struct FaultFixture {
     func coordinator(injector: FaultInjector? = nil,
                      manifestStore: ManifestStore = ManifestStore(),
                      networkManifestBatchFiles: Int = 16,
+                     overlapVerification: Bool = true,
                      now: (@Sendable () -> Date)? = nil) -> TransferCoordinator {
         // A small chunk keeps every fault landing mid-file while the fixture
         // stays small enough to run in a temporary directory.
         TransferCoordinator(fileSystem: LocalFileSystem(injector: injector, chunkBytes: 16_384),
                             manifestStore: manifestStore,
                             tuning: TransferTuning(chunkBytes: 16_384,
+                                                   overlapVerification: overlapVerification,
                                                    networkManifestBatchFiles: networkManifestBatchFiles),
                             now: now ?? { Date() })
     }

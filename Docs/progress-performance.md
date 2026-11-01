@@ -50,15 +50,17 @@ Both values are estimates and are labelled as such in the UI ("Estimated ·
 
 | Knob | Value | Why |
 | --- | --- | --- |
-| `progressInterval` | 0.2 s | Hard cap of five UI snapshots per second. Fast enough to read as live motion, slow enough that SwiftUI invalidation is not measurable against I/O. |
+| `progressInterval` | 0.2 s | Hard cap of five UI snapshots per second per phase. Fast enough to read as live motion, slow enough that SwiftUI invalidation is not measurable against I/O. |
 | `rateWindow` | 5 s | Long enough to absorb per-file boundaries and manifest writes; short enough that a card slowing down shows up within a few seconds. |
 | `rateSampleInterval` | 0.1 s | Bounds retained samples to about 50 per phase, and sets the shortest window a rate may be computed from. |
 | `chunkBytes` | 1 MiB | Unchanged from V1. Large enough to keep syscall overhead irrelevant on SD cards, small enough to keep cancellation responsive at chunk granularity. |
 | `destinationConcurrency` | 1 | Sequential by default. See below. |
+| `separateDeviceConcurrency` | 2 | Used instead when every destination is provably on its own hardware. See "Verification alongside the copy". |
+| `overlapVerification` | true | File N is read back while file N+1 copies. See "Verification alongside the copy". |
 | `networkManifestBatchFiles` | 16 | A network destination's record is saved once per this many files. See "Work per file in the copy phase". |
 | `networkManifestBatchBytes` | 512 MiB | Caps a batch of large video files, so a crash mid-batch costs at most this much re-copying. |
 
-All seven live in `TransferTuning`, are injected into `TransferCoordinator`, and
+All nine live in `TransferTuning`, are injected into `TransferCoordinator`, and
 are internal tuning values rather than user-facing settings.
 
 ### Why the byte-count trigger was removed
@@ -185,9 +187,70 @@ within run-to-run noise (dual-destination: 1.5–3.9 s before, 1.9–3.1 s after
 Both destinations of that benchmark sit on the same fast flash, which is the case
 this change helps least; the network table above is where it shows.
 
+## Verification alongside the copy
+
+Verification used to start only after the last file was copied, so with a
+network backup each phase left the other's hardware idle: while copying, the
+share waited on card reads; while verifying, the card sat idle and the read-back
+from the share was the only work in flight.
+
+Now file N is read back from every destination while file N+1 is copied, one
+file deep. Each read-back runs on its own `LocalFileSystem` peer, since sharing
+the copy's actor would serialise the two again. The results are held on the
+coordinator and recorded in the verification phase's first save rather than as
+they finish. A conflict pauses the transfer before verification, and a paused or
+interrupted transfer then claims nothing verified, exactly as before. Nothing is
+lost by holding them: a resume reads every `.copied` file back again anyway. It
+also removes the per-file verification save for every overlapped file, which on a
+network record is a run of round trips.
+
+Copy and verification keep separate aggregators, so the two bars move together
+and each is still capped at five snapshots per second. While the copy runs, the
+header, the destination rows, and the estimate follow the copy; "Verifying" is
+shown only once the last file is written. No verification snapshot reports its
+phase complete before the copy's does (`ProgressTests/overlappedPhasesStayIndependent`).
+
+Read-back of several destinations at once is still held to
+`destinationConcurrency` (1) when the destinations might share hardware. When
+every pair is provably apart — a local disk beside a network share, or two local
+disks Disk Arbitration places on different whole devices — it uses
+`separateDeviceConcurrency` (2) instead. A fallback identity never proves that,
+and neither do two network mounts with different host names
+(`VolumeIdentity.isOnSeparateHardware(from:)`).
+
+`ProgressBenchmark/measureOverlap`, 512 MiB across 16 files, two destinations on
+this machine's internal SSD, Debug build, three interleaved runs each:
+
+| Run | Elapsed | Snapshots/s |
+| --- | --- | --- |
+| Verification after copy | 2.44–3.32 s | 5.4–6.6 |
+| Verification alongside copy | 1.77–2.22 s | 9.0–11.3 |
+
+Both destinations on one fast SSD are the case overlap helps least, since the
+copy and the read-back compete for the same device. The network case is the one
+the change is for; `measureNetworkBackup` now runs both shapes back to back:
+
+```bash
+CARDVAULT_BENCH_NETWORK_DESTINATION=/Volumes/share/scratch swift test --disable-sandbox -Xswiftc -DCARDVAULT_BENCHMARK --filter ProgressBenchmark/measureNetworkBackup
+```
+
+Same 64 raw-sized files (384 MiB) to a local primary and a folder on an NFS
+share (`files-fast` on the same ZFS NAS as the table above), two runs each,
+Debug build, the two shapes interleaved within each run:
+
+| Run | Elapsed | Per file | Payload rate |
+| --- | --- | --- | --- |
+| Verification after copy, one destination at a time | 26.6–27.6 s | 0.42–0.43 s | 14.6–15.1 MB/s |
+| Verification alongside copy, local and share together | 18.1–21.8 s | 0.28–0.34 s | 18.4–22.2 MB/s |
+
+That is 21–34 percent less elapsed time on the case the change is for, and the
+row that justifies `overlapVerification` and `separateDeviceConcurrency` as
+defaults.
+
 ## What did not change
 
-Copy at 100 percent is a phase boundary, never a result. `TransferProgress`
+Copy at 100 percent is a phase boundary, never a result, and so is a
+read-back that has caught up with it. `TransferProgress`
 exposes `isPhaseComplete` for the phase only, the copy card says "Copy complete —
 verification still in progress", and the only success indicator in the UI reads
 from `TransferOutcome`. Checksums, flush and close ordering, the

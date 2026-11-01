@@ -668,7 +668,12 @@ final class AppModel {
         case .copying:
             // A copy at 100 percent is still not a success; verification decides.
             setStatus(update.isPhaseComplete ? .copyCompleteVerificationPending : .copying)
-        case .verifying: setStatus(.verifying)
+        case .verifying:
+            // Read-back overlaps the copy, and a copy still running is the
+            // phase the transfer is in: the header follows the copy until the
+            // last file is written.
+            guard copyProgress?.isPhaseComplete ?? true else { return }
+            setStatus(.verifying)
         case .finalizing: setStatus(.finalizing)
         }
     }
