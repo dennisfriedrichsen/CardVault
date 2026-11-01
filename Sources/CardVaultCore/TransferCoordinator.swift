@@ -262,15 +262,14 @@ public actor TransferCoordinator {
 
     // MARK: - Progress
 
-    /// Work bytes for one phase: every pass over a file's bytes counts once, so
-    /// the bar, the rate, and the estimate describe the same quantity.
-    private func workBytes(_ plan: TransferPlan, passes: Int) -> Int64 {
-        plan.totalBytes * Int64(max(0, passes))
-    }
-
-    private func beginPhase(_ phase: TransferProgress.Phase, totalFiles: Int, totalBytes: Int64) {
-        aggregator = ProgressAggregator(phase: phase, totalFiles: totalFiles, totalBytes: totalBytes,
-                                        tuning: tuning, startedAt: now())
+    /// Starts a phase measured in work bytes: every pass over a file's bytes
+    /// counts once, so the bar and the estimate describe the same quantity. The
+    /// pass count travels with the snapshots so the rate people read can be
+    /// stated in photo bytes instead.
+    private func beginPhase(_ phase: TransferProgress.Phase, totalFiles: Int, plan: TransferPlan, passes: Int) {
+        aggregator = ProgressAggregator(phase: phase, totalFiles: totalFiles,
+                                        totalBytes: plan.totalBytes * Int64(max(0, passes)),
+                                        passesPerFile: passes, tuning: tuning, startedAt: now())
     }
 
     /// Called from the file system for every chunk. Cheap, and never touches the
@@ -320,8 +319,7 @@ public actor TransferCoordinator {
     private func copy(plan: TransferPlan, manifest: inout TransferManifest,
                       locations: [Location]) async throws -> [DestinationConflict] {
         // One source hash pass plus one write pass per destination.
-        beginPhase(.copying, totalFiles: manifest.files.count,
-                   totalBytes: workBytes(plan, passes: 1 + locations.count))
+        beginPhase(.copying, totalFiles: manifest.files.count, plan: plan, passes: 1 + locations.count)
         let onBytes = byteHandler
         var indexes: [UUID: CompatibleManifestIndex] = [:]
         for location in locations {
@@ -522,8 +520,7 @@ public actor TransferCoordinator {
     }
 
     private func verify(plan: TransferPlan, manifest: inout TransferManifest, locations: [Location]) async throws {
-        beginPhase(.verifying, totalFiles: manifest.files.count,
-                   totalBytes: workBytes(plan, passes: locations.count))
+        beginPhase(.verifying, totalFiles: manifest.files.count, plan: plan, passes: locations.count)
         let readers = try await makeVerificationReaders(locations: locations)
         for index in manifest.files.indices {
             try Task.checkCancellation()
@@ -656,7 +653,7 @@ public actor TransferCoordinator {
         manifest.state = outcomeState
         if outcomeState == .verified { manifest.verifiedAt = now() }
         try await persist(manifest, locations: locations)
-        beginPhase(.finalizing, totalFiles: manifest.files.count, totalBytes: workBytes(plan, passes: 1))
+        beginPhase(.finalizing, totalFiles: manifest.files.count, plan: plan, passes: 1)
         await recordBytes(plan.totalBytes)
         await flushPhase(currentRelativePath: .some(nil))
         var outcomes: [DestinationOutcome] = []

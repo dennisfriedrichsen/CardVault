@@ -53,8 +53,10 @@ public struct TransferTuning: Sendable, Equatable {
 ///
 /// `completedBytes` and `totalBytes` count *work* bytes, not payload bytes: a
 /// file that is hashed at the source and written to two destinations contributes
-/// its size three times to the copy phase. That keeps the bar, the rate, and the
-/// estimate consistent with the work actually being performed.
+/// its size three times to the copy phase. That keeps the bar and the estimate
+/// consistent with the work actually being performed. The work rate is not a
+/// transfer speed, though — it triples with two destinations — so the rate shown
+/// to people is `photoBytesPerSecond`.
 public struct TransferProgress: Sendable, Equatable {
     public enum Phase: String, Sendable { case copying, verifying, finalizing }
     public let phase: Phase
@@ -63,8 +65,13 @@ public struct TransferProgress: Sendable, Equatable {
     public let completedBytes: Int64
     public let totalBytes: Int64
     public let currentRelativePath: String?
+    /// How many times this phase passes over each file's bytes: the hash plus
+    /// one write per destination when copying, one read-back per destination when
+    /// verifying.
+    public let passesPerFile: Int
     /// Recent throughput in work bytes per second, or `nil` before enough
-    /// samples exist. Always an estimate; never presented as a guarantee.
+    /// samples exist. Drives the estimate. Always an estimate; never presented
+    /// as a guarantee.
     public let bytesPerSecond: Double?
     /// Estimated seconds of work remaining in this phase, or `nil` when no rate
     /// is available yet. Always an estimate.
@@ -73,7 +80,7 @@ public struct TransferProgress: Sendable, Equatable {
 
     public init(phase: Phase, completedFiles: Int, totalFiles: Int,
                 completedBytes: Int64, totalBytes: Int64, currentRelativePath: String?,
-                bytesPerSecond: Double? = nil, estimatedSecondsRemaining: TimeInterval? = nil,
+                passesPerFile: Int = 1, bytesPerSecond: Double? = nil, estimatedSecondsRemaining: TimeInterval? = nil,
                 elapsedSeconds: TimeInterval = 0) {
         self.phase = phase
         self.completedFiles = completedFiles
@@ -81,9 +88,18 @@ public struct TransferProgress: Sendable, Equatable {
         self.completedBytes = completedBytes
         self.totalBytes = totalBytes
         self.currentRelativePath = currentRelativePath
+        self.passesPerFile = max(1, passesPerFile)
         self.bytesPerSecond = bytesPerSecond
         self.estimatedSecondsRemaining = estimatedSecondsRemaining
         self.elapsedSeconds = elapsedSeconds
+    }
+
+    /// Recent throughput in photo bytes per second — what reaches each
+    /// destination — or `nil` before a rate exists. This, not the work rate, is
+    /// what reads as transfer speed, and it does not change meaning with the
+    /// number of destinations.
+    public var photoBytesPerSecond: Double? {
+        bytesPerSecond.map { $0 / Double(passesPerFile) }
     }
 
     public var fractionCompleted: Double {
@@ -112,6 +128,7 @@ public struct ProgressAggregator: Sendable {
     public let phase: TransferProgress.Phase
     public let totalFiles: Int
     public let totalBytes: Int64
+    public let passesPerFile: Int
 
     private let tuning: TransferTuning
     private let startedAt: Date
@@ -126,10 +143,11 @@ public struct ProgressAggregator: Sendable {
     private var lastEmitTime: Date?
 
     public init(phase: TransferProgress.Phase, totalFiles: Int, totalBytes: Int64,
-                tuning: TransferTuning = .default, startedAt: Date) {
+                passesPerFile: Int = 1, tuning: TransferTuning = .default, startedAt: Date) {
         self.phase = phase
         self.totalFiles = totalFiles
         self.totalBytes = max(0, totalBytes)
+        self.passesPerFile = max(1, passesPerFile)
         self.tuning = tuning
         self.startedAt = startedAt
         self.committed = [Sample(time: startedAt, bytes: 0)]
@@ -205,7 +223,7 @@ public struct ProgressAggregator: Sendable {
         return TransferProgress(phase: phase, completedFiles: completedFiles, totalFiles: totalFiles,
                                 completedBytes: completedBytes, totalBytes: totalBytes,
                                 currentRelativePath: currentRelativePath,
-                                bytesPerSecond: rate, estimatedSecondsRemaining: estimate,
+                                passesPerFile: passesPerFile, bytesPerSecond: rate, estimatedSecondsRemaining: estimate,
                                 elapsedSeconds: time.timeIntervalSince(startedAt))
     }
 }
